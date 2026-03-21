@@ -197,7 +197,7 @@ fn parse_global_args() -> Result<GlobalOptions> {
 
 fn print_help() {
     println!(
-        "limux CLI\n\nUsage: limux [--socket <path>] [--json] [--id-format refs|both|uuids] <command> [args...]\n\nCommon commands:\n  identify [--workspace <id|ref>] [--surface <id|ref>]\n  list-panels [--workspace <id|ref>]\n  list-panes [--workspace <id|ref>]\n  list-workspaces\n  surface-health [--workspace <id|ref>]\n  send [--workspace <id|ref>] <text>\n  new-workspace [--cwd <path>] [--command <text>]\n  close-workspace --workspace <id|ref>\n  sidebar-state --workspace <id|ref>\n  new-surface [--workspace <id|ref>]\n  new-pane [--workspace <id|ref>] [--direction <left|right|up|down>] [--type <terminal|browser>] [--url <url>]\n  rename-workspace [--workspace <id|ref>] <title>\n  rename-window [--workspace <id|ref>] <title>\n  rename-tab [--workspace <id|ref>] [--tab <id|ref>] <title>\n  read-screen [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]\n  capture-pane (alias of read-screen)\n  tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]\n  browser [--surface <id|ref>|<surface>] <subcommand> ...\n"
+        "limux CLI\n\nUsage: limux [--socket <path>] [--json] [--id-format refs|both|uuids] <command> [args...]\n\nCommon commands:\n  identify [--workspace <id|ref>] [--surface <id|ref>]\n  list-panels [--workspace <id|ref>]\n  list-panes [--workspace <id|ref>]\n  list-workspaces\n  surface-health [--workspace <id|ref>]\n  notifications [--unread]\n  notify [--title <text>] [--subtitle <text>] [--body <text>] [--surface <id|ref>] <message>\n  clear-notifications [--notification <id|ref>]\n  send [--workspace <id|ref>] <text>\n  new-workspace [--cwd <path>] [--command <text>]\n  close-workspace --workspace <id|ref>\n  sidebar-state --workspace <id|ref>\n  new-surface [--workspace <id|ref>]\n  new-pane [--workspace <id|ref>] [--direction <left|right|up|down>] [--type <terminal|browser>] [--url <url>]\n  rename-workspace [--workspace <id|ref>] <title>\n  rename-window [--workspace <id|ref>] <title>\n  rename-tab [--workspace <id|ref>] [--tab <id|ref>] <title>\n  read-screen [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]\n  capture-pane (alias of read-screen)\n  tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]\n  browser [--surface <id|ref>|<surface>] <subcommand> ...\n"
     );
 }
 
@@ -327,6 +327,10 @@ fn trailing_title(args: &[String]) -> Option<String> {
     } else {
         Some(filtered.join(" "))
     }
+}
+
+fn normalize_notification_id(raw: &str) -> String {
+    raw.strip_prefix("notification:").unwrap_or(raw).to_string()
 }
 
 fn wait_signal_path(name: &str) -> PathBuf {
@@ -657,6 +661,118 @@ fn render_list_text(command: &str, payload: &Value) -> String {
         }
         _ => "".to_string(),
     }
+}
+
+fn render_notifications_text(payload: &Value) -> String {
+    let rows = payload
+        .get("notifications")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if rows.is_empty() {
+        return "No notifications".to_string();
+    }
+
+    rows.iter()
+        .map(|row| {
+            let handle = get_string(row, &["id"])
+                .map(|id| format!("notification:{id}"))
+                .unwrap_or_else(|| "notification:?".to_string());
+            let unread = row.get("unread").and_then(Value::as_bool).unwrap_or(false);
+            let message = get_string(row, &["message"]).unwrap_or_else(|| {
+                [
+                    get_string(row, &["title"]),
+                    get_string(row, &["subtitle"]),
+                    get_string(row, &["body"]),
+                ]
+                .into_iter()
+                .flatten()
+                .filter(|part| !part.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+            });
+            let workspace = get_string(row, &["workspace_id"])
+                .map(|id| format!("workspace:{id}"))
+                .unwrap_or_default();
+            let surface = get_string(row, &["surface_id"])
+                .map(|id| format!("surface:{id}"))
+                .unwrap_or_default();
+            let mut parts = Vec::new();
+            parts.push(if unread {
+                "*".to_string()
+            } else {
+                " ".to_string()
+            });
+            parts.push(handle);
+            if !workspace.is_empty() {
+                parts.push(workspace);
+            }
+            if !surface.is_empty() {
+                parts.push(surface);
+            }
+            if !message.is_empty() {
+                parts.push(message);
+            }
+            parts.join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn run_notifications(client: &mut Client, args: &[String]) -> Result<Value> {
+    let unread_only = parse_flag(args, "--unread") || parse_flag(args, "--unread-only");
+    client
+        .call("notification.list", json!({ "unread_only": unread_only }))
+        .await
+}
+
+async fn run_notify(client: &mut Client, args: &[String]) -> Result<Value> {
+    let message = trailing_title(args).unwrap_or_default();
+    let title = parse_opt(args, "--title").unwrap_or_default();
+    let subtitle = parse_opt(args, "--subtitle").unwrap_or_default();
+    let body = parse_opt(args, "--body").unwrap_or_default();
+    let surface = parse_opt(args, "--surface");
+
+    if message.is_empty() && title.is_empty() && body.is_empty() {
+        bail!("notify requires a message, --title, or --body");
+    }
+
+    let mut params = Map::new();
+    if !message.is_empty() {
+        params.insert("message".to_string(), Value::String(message));
+    }
+    if !title.is_empty() {
+        params.insert("title".to_string(), Value::String(title));
+    }
+    if !subtitle.is_empty() {
+        params.insert("subtitle".to_string(), Value::String(subtitle));
+    }
+    if !body.is_empty() {
+        params.insert("body".to_string(), Value::String(body));
+    }
+
+    if let Some(surface) = surface {
+        params.insert("surface_id".to_string(), Value::String(surface));
+        client
+            .call("notification.create_for_surface", Value::Object(params))
+            .await
+    } else {
+        client
+            .call("notification.create", Value::Object(params))
+            .await
+    }
+}
+
+async fn run_clear_notifications(client: &mut Client, args: &[String]) -> Result<Value> {
+    let notification = parse_opt(args, "--notification")
+        .or_else(|| parse_opt(args, "--id"))
+        .map(|value| normalize_notification_id(&value));
+
+    let params = match notification {
+        Some(notification_id) => json!({ "notification_id": notification_id }),
+        None => json!({}),
+    };
+    client.call("notification.clear", params).await
 }
 
 async fn run_send(client: &mut Client, args: &[String]) -> Result<Value> {
@@ -1757,6 +1873,44 @@ async fn execute_command(client: &mut Client, opts: &GlobalOptions) -> Result<Co
                 CommandOutput::Text(render_list_text(command, &payload))
             }
         }
+        "notifications" | "list-notifications" => {
+            let payload = run_notifications(client, args).await?;
+            if opts.json_output {
+                CommandOutput::Json(payload)
+            } else {
+                CommandOutput::Text(render_notifications_text(&payload))
+            }
+        }
+        "notify" => {
+            let payload = run_notify(client, args).await?;
+            if opts.json_output {
+                CommandOutput::Json(payload)
+            } else if payload
+                .get("suppressed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                CommandOutput::Text("suppressed".to_string())
+            } else {
+                let handle = get_string(&payload, &["notification_id"])
+                    .map(|id| format!("notification:{id}"))
+                    .unwrap_or_else(|| "notification:?".to_string());
+                CommandOutput::Text(format!("OK {}", handle))
+            }
+        }
+        "clear-notifications" => {
+            let payload = run_clear_notifications(client, args).await?;
+            if opts.json_output {
+                CommandOutput::Json(payload)
+            } else {
+                let remaining = payload
+                    .get("notifications")
+                    .and_then(Value::as_array)
+                    .map(|rows| rows.len())
+                    .unwrap_or(0);
+                CommandOutput::Text(format!("OK remaining={remaining}"))
+            }
+        }
         "send" => {
             let payload = run_send(client, args).await?;
             if opts.json_output {
@@ -1933,5 +2087,49 @@ async fn main() -> Result<()> {
             eprintln!("{}", err);
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_notification_id_accepts_prefixed_handle() {
+        assert_eq!(normalize_notification_id("notification:42"), "42");
+        assert_eq!(normalize_notification_id("42"), "42");
+    }
+
+    #[test]
+    fn render_notifications_text_handles_empty_history() {
+        let payload = json!({ "notifications": [] });
+        assert_eq!(render_notifications_text(&payload), "No notifications");
+    }
+
+    #[test]
+    fn render_notifications_text_includes_handles_and_message() {
+        let payload = json!({
+            "notifications": [
+                {
+                    "id": "5",
+                    "message": "agent done",
+                    "workspace_id": "2",
+                    "surface_id": "7",
+                    "unread": true
+                },
+                {
+                    "id": "6",
+                    "title": "review",
+                    "subtitle": "needs input",
+                    "body": "",
+                    "unread": false
+                }
+            ]
+        });
+
+        assert_eq!(
+            render_notifications_text(&payload),
+            "* notification:5 workspace:2 surface:7 agent done\n  notification:6 review needs input"
+        );
     }
 }
