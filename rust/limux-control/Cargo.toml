@@ -11,6 +11,7 @@ crate-type = ["rlib", "staticlib"]
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+libc.workspace = true
 limux-core = { path = "../limux-core" }
 limux-protocol = { path = "../limux-protocol" }
 serde.workspace = true

@@ -729,6 +729,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
  "limux-core",
  "limux-protocol",
  "serde",
@@ -766,6 +767,7 @@ dependencies = [
  "limux-ghostty-sys",
  "serde",
  "serde_json",
+ "tempfile",
  "uuid",
  "webkit6",
 ]

@@ -1,4 +1,5 @@
 mod pane;
+mod session;
 mod terminal;
 mod window;
 

@@ -7,40 +7,15 @@ use gtk4 as gtk;
 use libadwaita as adw;
 
 use crate::pane::{self, PaneCallbacks};
+use crate::session::{load_session_snapshot, save_session_snapshot, SavedSession, SavedWorkspace};
 
 // ---------------------------------------------------------------------------
 // Workspace persistence
 // ---------------------------------------------------------------------------
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-struct SavedWorkspace {
-    name: String,
-    favorite: bool,
-    #[serde(default)]
-    cwd: Option<String>,
-    #[serde(default)]
-    folder_path: Option<String>,
-}
-
-fn persistence_path() -> std::path::PathBuf {
-    let dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("~/.local/share"))
-        .join("limux");
-    std::fs::create_dir_all(&dir).ok();
-    dir.join("workspaces.json")
-}
-
-fn load_workspaces() -> Vec<SavedWorkspace> {
-    let path = persistence_path();
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-fn save_workspaces(state: &State) {
+fn snapshot_session(state: &State) -> SavedSession {
     let s = state.borrow();
-    let saved: Vec<SavedWorkspace> = s
+    let workspaces = s
         .workspaces
         .iter()
         .map(|ws| SavedWorkspace {
@@ -50,9 +25,60 @@ fn save_workspaces(state: &State) {
             folder_path: ws.folder_path.clone(),
         })
         .collect();
-    if let Ok(json) = serde_json::to_string_pretty(&saved) {
-        let path = persistence_path();
-        std::fs::write(&path, json).ok();
+
+    SavedSession {
+        version: 1,
+        active_workspace_index: (!s.workspaces.is_empty()).then_some(s.active_idx),
+        sidebar_visible: s
+            .paned
+            .start_child()
+            .is_some_and(|sidebar| sidebar.is_visible()),
+        sidebar_expanded_width: Some(s.sidebar_expanded_width),
+        workspaces,
+    }
+}
+
+fn save_session_state(state: &State) {
+    save_session_snapshot(&snapshot_session(state));
+}
+
+fn restore_session_ui(state: &State, session: &SavedSession) {
+    let (stack_name, row_to_select) = {
+        let mut s = state.borrow_mut();
+        if let Some(width) = session.sidebar_expanded_width {
+            s.sidebar_expanded_width = width.max(SIDEBAR_WIDTH);
+        }
+
+        if let Some(sidebar) = s.paned.start_child() {
+            sidebar.set_visible(session.sidebar_visible);
+        }
+        s.expand_btn.set_visible(!session.sidebar_visible);
+        s.paned.set_position(if session.sidebar_visible {
+            s.sidebar_expanded_width.max(SIDEBAR_WIDTH)
+        } else {
+            0
+        });
+
+        if s.workspaces.is_empty() {
+            return;
+        }
+
+        let idx = session
+            .active_workspace_index
+            .unwrap_or(s.active_idx)
+            .min(s.workspaces.len() - 1);
+        s.active_idx = idx;
+        (
+            Some(format!("ws-{}", s.workspaces[idx].id)),
+            Some(s.workspaces[idx].sidebar_row.clone()),
+        )
+    };
+
+    if let Some(stack_name) = stack_name {
+        state.borrow().stack.set_visible_child_name(&stack_name);
+    }
+    if let Some(row) = row_to_select {
+        state.borrow().sidebar_list.select_row(Some(&row));
     }
 }
 
@@ -506,7 +532,7 @@ pub fn build_window(app: &adw::Application) {
             btn.remove_css_class("limux-sidebar-btn-trash-hover");
             if let Ok(workspace_id) = value.get::<String>() {
                 close_workspace_by_id(&state, &workspace_id);
-                save_workspaces(&state);
+                save_session_state(&state);
                 return true;
             }
             false
@@ -517,14 +543,14 @@ pub fn build_window(app: &adw::Application) {
     {
         let state = state.clone();
         window.connect_close_request(move |_| {
-            save_workspaces(&state);
+            save_session_state(&state);
             glib::Propagation::Proceed
         });
     }
 
     // Restore saved workspaces (if any). Empty start is fine — user clicks "New Workspace".
-    let saved = load_workspaces();
-    for sw in &saved {
+    let saved = load_session_snapshot();
+    for sw in &saved.workspaces {
         add_workspace_with_name(
             &state,
             &sw.name,
@@ -533,6 +559,7 @@ pub fn build_window(app: &adw::Application) {
             sw.folder_path.as_deref(),
         );
     }
+    restore_session_ui(&state, &saved);
     window.present();
 }
 
@@ -845,7 +872,7 @@ fn show_workspace_context_menu(state: &State, workspace_id: &str, row: &gtk::Lis
         delete_btn.connect_clicked(move |_| {
             pop.popdown();
             close_workspace_by_id(&state, &ws_id);
-            save_workspaces(&state);
+            save_session_state(&state);
         });
     }
     {
@@ -1010,7 +1037,7 @@ fn begin_workspace_inline_rename(state: &State, workspace_id: &str) {
                     workspace.name = next_name;
                 }
                 drop(s);
-                save_workspaces(&state_for_commit);
+                save_session_state(&state_for_commit);
             }
 
             label_for_commit.set_visible(true);
@@ -1115,7 +1142,7 @@ fn reorder_workspace_by_id(
     if let Some(row) = row_to_select {
         sidebar_list.select_row(Some(&row));
     }
-    save_workspaces(state);
+    save_session_state(state);
 
     true
 }
@@ -1165,7 +1192,7 @@ fn toggle_workspace_favorite(state: &State, workspace_id: &str) {
     if let Some(row) = row_to_select {
         sidebar_list.select_row(Some(&row));
     }
-    save_workspaces(state);
+    save_session_state(state);
 }
 
 fn install_workspace_row_interactions(
@@ -1361,7 +1388,7 @@ fn create_workspace_with_folder(state: &State, name: &str, folder_path: &str) {
     drop(s);
 
     sidebar_list.select_row(Some(&row));
-    save_workspaces(state);
+    save_session_state(state);
 }
 
 fn add_workspace_with_name(
@@ -1494,7 +1521,7 @@ fn close_workspace_by_id(state: &State, id: &str) {
     if s.workspaces.is_empty() {
         s.active_idx = 0;
         drop(s);
-        save_workspaces(state);
+        save_session_state(state);
         return;
     }
 
@@ -1509,7 +1536,7 @@ fn close_workspace_by_id(state: &State, id: &str) {
     drop(s);
 
     sidebar_list.select_row(Some(&row));
-    save_workspaces(state);
+    save_session_state(state);
 }
 
 fn switch_workspace(state: &State, idx: usize) {
@@ -1535,6 +1562,8 @@ fn switch_workspace(state: &State, idx: usize) {
             row_box.remove_css_class("limux-sidebar-row-unread");
         }
     }
+    drop(s);
+    save_session_state(state);
 }
 
 fn cycle_workspace(state: &State, direction: i32) {
@@ -1620,6 +1649,7 @@ fn toggle_sidebar(state: &State) {
             if is_current {
                 sidebar.set_visible(false);
                 expand_btn_for_done.set_visible(true);
+                save_session_state(&state_for_done);
             }
         });
         state.borrow_mut().sidebar_animation = Some(animation.clone());
@@ -1656,6 +1686,7 @@ fn toggle_sidebar(state: &State) {
             };
             if is_current {
                 expand_btn_for_done.set_visible(false);
+                save_session_state(&state_for_done);
             }
         });
         state.borrow_mut().sidebar_animation = Some(animation.clone());
@@ -1679,11 +1710,7 @@ fn split_pane(
         s.workspaces
             .iter()
             .find(|w| w.id == ws_id)
-            .and_then(|ws| {
-                ws.folder_path
-                    .clone()
-                    .or_else(|| ws.cwd.borrow().clone())
-            })
+            .and_then(|ws| ws.folder_path.clone().or_else(|| ws.cwd.borrow().clone()))
     };
     let new_pane = create_pane_for_workspace(state, ws_id, wd.as_deref());
 
@@ -1978,7 +2005,6 @@ fn find_leaf_pane(widget: &gtk::Widget, axis: gtk::Orientation, prefer_start: bo
         widget.clone()
     }
 }
-
 
 fn mark_workspace_unread(state: &State, ws_id: &str) {
     let mut s = state.borrow_mut();

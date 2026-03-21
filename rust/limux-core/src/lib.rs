@@ -174,6 +174,8 @@ const COMMANDS: &[&str] = &[
     "debug.window.screenshot",
 ];
 
+const MAX_NOTIFICATIONS: usize = 500;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceInfo {
     pub id: u64,
@@ -1733,9 +1735,6 @@ impl ControlState {
             }
         }
 
-        // Keep only the newest notification, matching app behavior expected by tests.
-        self.notifications.clear();
-
         let id = self.next_notification_id;
         self.next_notification_id += 1;
 
@@ -1749,6 +1748,10 @@ impl ControlState {
             workspace_id,
             unread: true,
         };
+        if self.notifications.len() >= MAX_NOTIFICATIONS {
+            self.notifications.drain(..self.notifications.len() / 4);
+        }
+
         self.notifications.push(notification.clone());
         Some(notification)
     }
@@ -3882,7 +3885,10 @@ fn handle_browser_extended_command(
                 ];
             }
             if script.contains("window.emitConsoleAndError") {
-                state.browser.console.push("limux-console-entry".to_string());
+                state
+                    .browser
+                    .console
+                    .push("limux-console-entry".to_string());
                 state.browser.errors.push("limux-boom".to_string());
             }
             let value = state
@@ -6454,6 +6460,15 @@ mod tests {
             "agent done"
         );
 
+        let follow_up = dispatcher
+            .dispatch(request(
+                "notification.create",
+                json!({ "message": "agent follow-up" }),
+            ))
+            .await;
+        let follow_up_id =
+            follow_up.result.expect("follow-up notification")["notification"]["id"].clone();
+
         let listed = dispatcher
             .dispatch(request("notification.list", json!({})))
             .await;
@@ -6461,6 +6476,20 @@ mod tests {
             listed.result.expect("notification list")["notifications"]
                 .as_array()
                 .expect("notifications")
+                .len(),
+            2
+        );
+
+        let cleared_one = dispatcher
+            .dispatch(request(
+                "notification.clear",
+                json!({ "notification_id": follow_up_id }),
+            ))
+            .await;
+        assert_eq!(
+            cleared_one.result.expect("notification clear one")["notifications"]
+                .as_array()
+                .expect("notifications after clearing one")
                 .len(),
             1
         );
