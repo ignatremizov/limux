@@ -1,11 +1,13 @@
 use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
+use shell_quote::Bash;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
+use std::os::unix::ffi::OsStringExt;
 use std::ptr;
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -28,6 +30,7 @@ static GHOSTTY: OnceLock<GhosttyState> = OnceLock::new();
 
 type TitleChangedCallback = dyn Fn(&str);
 type PwdChangedCallback = dyn Fn(&str);
+type DesktopNotificationCallback = dyn Fn(&str, &str);
 type VoidCallback = dyn Fn();
 
 /// Per-surface state, stored in a global registry keyed by surface pointer.
@@ -36,6 +39,7 @@ struct SurfaceEntry {
     toast_overlay: gtk::Overlay,
     on_title_changed: Option<Box<TitleChangedCallback>>,
     on_pwd_changed: Option<Box<PwdChangedCallback>>,
+    on_desktop_notification: Option<Box<DesktopNotificationCallback>>,
     on_bell: Option<Box<VoidCallback>>,
     on_close: Option<Box<VoidCallback>>,
     clipboard_context: *mut ClipboardContext,
@@ -168,6 +172,37 @@ unsafe extern "C" fn ghostty_action_cb(
                         }
                     });
                 }
+            }
+            true
+        }
+        GHOSTTY_ACTION_DESKTOP_NOTIFICATION => {
+            if target.tag == GHOSTTY_TARGET_SURFACE {
+                let surface_key = unsafe { target.target.surface } as usize;
+                let title_ptr = unsafe { action.action.desktop_notification.title };
+                let body_ptr = unsafe { action.action.desktop_notification.body };
+                let title = if title_ptr.is_null() {
+                    String::new()
+                } else {
+                    unsafe { std::ffi::CStr::from_ptr(title_ptr) }
+                        .to_str()
+                        .unwrap_or("")
+                        .to_string()
+                };
+                let body = if body_ptr.is_null() {
+                    String::new()
+                } else {
+                    unsafe { std::ffi::CStr::from_ptr(body_ptr) }
+                        .to_str()
+                        .unwrap_or("")
+                        .to_string()
+                };
+                SURFACE_MAP.with(|map| {
+                    if let Some(entry) = map.borrow().get(&surface_key) {
+                        if let Some(cb) = &entry.on_desktop_notification {
+                            cb(&title, &body);
+                        }
+                    }
+                });
             }
             true
         }
@@ -364,6 +399,7 @@ unsafe extern "C" fn ghostty_close_surface_cb(userdata: *mut c_void, _process_al
 pub struct TerminalCallbacks {
     pub on_title_changed: Box<TitleChangedCallback>,
     pub on_pwd_changed: Box<PwdChangedCallback>,
+    pub on_desktop_notification: Box<DesktopNotificationCallback>,
     pub on_bell: Box<VoidCallback>,
     pub on_close: Box<VoidCallback>,
     pub on_split_right: Box<VoidCallback>,
@@ -484,6 +520,10 @@ pub fn create_terminal(
                         on_pwd_changed: Some(Box::new({
                             let cb = callbacks.clone();
                             move |pwd| (cb.on_pwd_changed)(pwd)
+                        })),
+                        on_desktop_notification: Some(Box::new({
+                            let cb = callbacks.clone();
+                            move |title, body| (cb.on_desktop_notification)(title, body)
                         })),
                         on_bell: Some(Box::new({
                             let cb = callbacks.clone();
@@ -730,6 +770,32 @@ pub fn create_terminal(
             }
         });
         gl_area.add_controller(focus_ctrl);
+    }
+
+    // Accept file drops from the desktop and paste their shell-escaped paths.
+    {
+        let surface_cell = surface_cell.clone();
+        let drop_target = gtk::DropTarget::new(
+            gtk::gdk::FileList::static_type(),
+            gtk::gdk::DragAction::COPY,
+        );
+        drop_target.connect_drop(move |_target, value, _x, _y| {
+            let Some(surface) = *surface_cell.borrow() else {
+                return false;
+            };
+            let Ok(file_list) = value.get::<gtk::gdk::FileList>() else {
+                return false;
+            };
+            let Some(text) = dropped_file_text(&file_list) else {
+                return false;
+            };
+
+            unsafe {
+                ghostty_surface_text(surface, text.as_ptr(), text.as_bytes().len());
+            }
+            true
+        });
+        gl_area.add_controller(drop_target);
     }
 
     // On unrealize: deinit GL resources but keep the surface alive.
@@ -1056,6 +1122,40 @@ fn show_clipboard_toast(overlay: &gtk::Overlay) {
     }
 }
 
+fn dropped_file_text(file_list: &gtk::gdk::FileList) -> Option<CString> {
+    shell_escape_joined_bytes(
+        file_list
+            .files()
+            .iter()
+            .filter_map(|file| file.path())
+            .map(|path| path.into_os_string().into_vec()),
+    )
+}
+
+fn shell_escape_bytes(bytes: &[u8]) -> Vec<u8> {
+    Bash::quote_vec(bytes)
+}
+
+fn shell_escape_joined_bytes<I, B>(paths: I) -> Option<CString>
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+{
+    let mut text = Vec::new();
+    for path in paths {
+        if !text.is_empty() {
+            text.push(b' ');
+        }
+        text.extend(shell_escape_bytes(path.as_ref()));
+    }
+
+    if text.is_empty() {
+        return None;
+    }
+
+    CString::new(text).ok()
+}
+
 fn translate_mouse_mods(state: gtk::gdk::ModifierType) -> c_int {
     let mut mods: c_int = GHOSTTY_MODS_NONE;
     if state.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
@@ -1115,5 +1215,68 @@ mod tests {
         assert_eq!(ctrl_shift_h.as_deref(), Some("H"));
         assert_eq!(alt_shift_gt.as_deref(), Some(">"));
         assert!(key_event_text(gtk::gdk::Key::BackSpace).is_none());
+    }
+
+    #[test]
+    fn shell_escape_preserves_simple_paths() {
+        assert_eq!(
+            shell_escape_bytes(b"/home/user/file.txt"),
+            b"/home/user/file.txt"
+        );
+        assert_eq!(shell_escape_bytes(b"/tmp/a-b_c.rs"), b"/tmp/a-b_c.rs");
+    }
+
+    #[test]
+    fn shell_escape_quotes_paths_with_spaces() {
+        assert_eq!(
+            shell_escape_bytes(b"/home/user/my file.txt"),
+            b"$'/home/user/my file.txt'"
+        );
+    }
+
+    #[test]
+    fn shell_escape_handles_single_quotes() {
+        assert_eq!(
+            shell_escape_bytes(b"/tmp/it's a file"),
+            b"$'/tmp/it\\'s a file'"
+        );
+    }
+
+    #[test]
+    fn shell_escape_preserves_non_utf8_bytes() {
+        assert_eq!(
+            shell_escape_bytes(b"/home/user/\xff\xfefile.txt"),
+            b"$'/home/user/\\xFF\\xFEfile.txt'"
+        );
+    }
+
+    #[test]
+    fn shell_escape_hex_escapes_terminal_control_bytes() {
+        assert_eq!(
+            shell_escape_bytes(b"/tmp/line\nbreak\tand\x03escape\x1b"),
+            b"$'/tmp/line\\nbreak\\tand\\x03escape\\e'"
+        );
+    }
+
+    #[test]
+    fn shell_escape_joins_multiple_paths_for_terminal_drop() {
+        let text = shell_escape_joined_bytes([
+            b"/tmp/plain".as_slice(),
+            b"/tmp/space name".as_slice(),
+            b"/tmp/it's".as_slice(),
+            b"/tmp/\xff\xfe".as_slice(),
+            b"/tmp/line\nbreak".as_slice(),
+        ])
+        .expect("drop payload must be NUL-free");
+
+        assert_eq!(
+            text.as_bytes(),
+            b"/tmp/plain $'/tmp/space name' $'/tmp/it\\'s' $'/tmp/\\xFF\\xFE' $'/tmp/line\\nbreak'"
+        );
+    }
+
+    #[test]
+    fn shell_escape_joined_bytes_rejects_empty_input() {
+        assert!(shell_escape_joined_bytes(std::iter::empty::<&[u8]>()).is_none());
     }
 }

@@ -68,33 +68,70 @@ impl AppState {
 type State = Rc<RefCell<AppState>>;
 const SPLIT_RATIO_STATE_KEY: &str = "limux-split-ratio-state";
 
-fn request_session_save(state: &State) {
-    let should_schedule = {
-        let mut s = state.borrow_mut();
-        if s.persistence_suspended || s.save_queued {
-            false
-        } else {
-            s.save_queued = true;
-            true
-        }
-    };
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionSaveRequest {
+    Ignore,
+    RetryOnIdle,
+    FlushOnIdle,
+}
 
-    if !should_schedule {
-        return;
+trait SessionSaveAccess {
+    fn persistence_suspended(&self) -> bool;
+    fn save_queued(&self) -> bool;
+    fn set_save_queued(&mut self, queued: bool);
+}
+
+impl SessionSaveAccess for AppState {
+    fn persistence_suspended(&self) -> bool {
+        self.persistence_suspended
     }
 
-    let state = state.clone();
-    glib::idle_add_local_once(move || {
-        let should_save = {
-            let mut s = state.borrow_mut();
-            let should_save = s.save_queued && !s.persistence_suspended;
-            s.save_queued = false;
-            should_save
-        };
-        if should_save {
-            save_session_now(&state);
+    fn save_queued(&self) -> bool {
+        self.save_queued
+    }
+
+    fn set_save_queued(&mut self, queued: bool) {
+        self.save_queued = queued;
+    }
+}
+
+fn queue_session_save_request<T: SessionSaveAccess>(state: &Rc<RefCell<T>>) -> SessionSaveRequest {
+    let Ok(mut s) = state.try_borrow_mut() else {
+        return SessionSaveRequest::RetryOnIdle;
+    };
+
+    if s.persistence_suspended() || s.save_queued() {
+        SessionSaveRequest::Ignore
+    } else {
+        s.set_save_queued(true);
+        SessionSaveRequest::FlushOnIdle
+    }
+}
+
+fn request_session_save(state: &State) {
+    match queue_session_save_request(state) {
+        SessionSaveRequest::Ignore => {}
+        SessionSaveRequest::RetryOnIdle => {
+            let state = state.clone();
+            glib::idle_add_local_once(move || {
+                request_session_save(&state);
+            });
         }
-    });
+        SessionSaveRequest::FlushOnIdle => {
+            let state = state.clone();
+            glib::idle_add_local_once(move || {
+                let should_save = {
+                    let mut s = state.borrow_mut();
+                    let should_save = s.save_queued && !s.persistence_suspended;
+                    s.save_queued = false;
+                    should_save
+                };
+                if should_save {
+                    save_session_now(&state);
+                }
+            });
+        }
+    }
 }
 
 fn save_session_now(state: &State) {
@@ -1617,7 +1654,6 @@ fn create_workspace_with_folder(state: &State, name: &str, folder_path: &str) {
 }
 
 fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
-    let mut s = state.borrow_mut();
     let id = uuid::Uuid::new_v4().to_string();
     let stack_name = format!("ws-{id}");
     let working_dir = workspace
@@ -1625,24 +1661,20 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         .as_deref()
         .or(workspace.cwd.as_deref());
     let root = build_workspace_root(state, &id, working_dir, Some(&workspace.layout));
-
-    s.stack.add_named(&root, Some(&stack_name));
-
     let (row, name_label, favorite_button, notify_dot, notify_label, path_label) =
         build_sidebar_row(&workspace.name, workspace.folder_path.as_deref());
-    s.sidebar_list.append(&row);
     install_workspace_row_interactions(state, &id, &row, &favorite_button);
 
     let cwd: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(workspace.cwd.clone()));
     let ws = Workspace {
         id,
         name: workspace.name.clone(),
-        root,
+        root: root.clone(),
         sidebar_row: row.clone(),
         name_label,
-        favorite_button,
-        notify_dot,
-        notify_label,
+        favorite_button: favorite_button.clone(),
+        notify_dot: notify_dot.clone(),
+        notify_label: notify_label.clone(),
         unread: false,
         favorite: workspace.favorite,
         cwd,
@@ -1654,14 +1686,17 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         set_workspace_favorite_visual(&ws);
     }
 
-    s.workspaces.push(ws);
-    let new_idx = s.workspaces.len() - 1;
-    s.active_idx = new_idx;
-    s.stack.set_visible_child_name(&stack_name);
+    let (stack, sidebar_list) = {
+        let mut s = state.borrow_mut();
+        s.workspaces.push(ws);
+        let new_idx = s.workspaces.len() - 1;
+        s.active_idx = new_idx;
+        (s.stack.clone(), s.sidebar_list.clone())
+    };
 
-    let sidebar_list = s.sidebar_list.clone();
-    drop(s);
-
+    stack.add_named(&root, Some(&stack_name));
+    sidebar_list.append(&row);
+    stack.set_visible_child_name(&stack_name);
     sidebar_list.select_row(Some(&row));
 }
 
@@ -1697,6 +1732,18 @@ fn create_pane_for_workspace(
             glib::idle_add_local_once(move || {
                 mark_workspace_unread(&state, &ws_id);
             });
+        }),
+        on_desktop_notification: Box::new({
+            let state = state.clone();
+            let ws_id = ws_id.to_string();
+            move |title: &str, body: &str| {
+                let state = state.clone();
+                let ws_id = ws_id.clone();
+                let message = workspace_notification_message(title, body);
+                glib::idle_add_local_once(move || {
+                    mark_workspace_unread_with_message(&state, &ws_id, &message);
+                });
+            }
         }),
         on_pwd_changed: Box::new(move |pwd: &str| {
             let state = state_for_pwd.clone();
@@ -1763,29 +1810,40 @@ fn close_workspace_by_id(state: &State, id: &str) {
 }
 
 fn switch_workspace(state: &State, idx: usize) {
-    let mut s = state.borrow_mut();
-    if idx >= s.workspaces.len() || idx == s.active_idx {
-        return;
-    }
-    s.active_idx = idx;
-    let stack_name = format!("ws-{}", s.workspaces[idx].id);
-    s.stack.set_visible_child_name(&stack_name);
+    let (stack, stack_name, unread_widgets) = {
+        let mut s = state.borrow_mut();
+        if idx >= s.workspaces.len() || idx == s.active_idx {
+            return;
+        }
+        s.active_idx = idx;
+        let stack = s.stack.clone();
+        let stack_name = format!("ws-{}", s.workspaces[idx].id);
+        let ws = &mut s.workspaces[idx];
+        let unread_widgets = if ws.unread {
+            ws.unread = false;
+            Some((
+                ws.notify_dot.clone(),
+                ws.notify_label.clone(),
+                ws.sidebar_row.clone(),
+            ))
+        } else {
+            None
+        };
+        (stack, stack_name, unread_widgets)
+    };
 
-    // Clear unread
-    let ws = &mut s.workspaces[idx];
-    if ws.unread {
-        ws.unread = false;
-        ws.notify_dot.remove_css_class("limux-notify-dot");
-        ws.notify_dot.add_css_class("limux-notify-dot-hidden");
-        ws.notify_label.remove_css_class("limux-notify-msg-unread");
-        ws.notify_label.add_css_class("limux-notify-msg");
-        ws.notify_label.set_visible(false);
-        // Remove glow pulse from sidebar row
-        if let Some(row_box) = ws.sidebar_row.child() {
+    stack.set_visible_child_name(&stack_name);
+    if let Some((notify_dot, notify_label, sidebar_row)) = unread_widgets {
+        notify_dot.remove_css_class("limux-notify-dot");
+        notify_dot.add_css_class("limux-notify-dot-hidden");
+        notify_label.remove_css_class("limux-notify-msg-unread");
+        notify_label.add_css_class("limux-notify-msg");
+        notify_label.set_visible(false);
+        if let Some(row_box) = sidebar_row.child() {
             row_box.remove_css_class("limux-sidebar-row-unread");
         }
     }
-    drop(s);
+
     request_session_save(state);
 }
 
@@ -2235,6 +2293,21 @@ fn find_leaf_pane(widget: &gtk::Widget, axis: gtk::Orientation, prefer_start: bo
 }
 
 fn mark_workspace_unread(state: &State, ws_id: &str) {
+    mark_workspace_unread_with_message(state, ws_id, "Process needs attention");
+}
+
+fn workspace_notification_message(title: &str, body: &str) -> String {
+    let title = title.trim();
+    let body = body.trim();
+    match (title.is_empty(), body.is_empty()) {
+        (false, false) => format!("{title}: {body}"),
+        (false, true) => title.to_string(),
+        (true, false) => body.to_string(),
+        (true, true) => "Process needs attention".to_string(),
+    }
+}
+
+fn mark_workspace_unread_with_message(state: &State, ws_id: &str, message: &str) {
     let mut s = state.borrow_mut();
     let active_idx = s.active_idx;
     if let Some((idx, ws)) = s
@@ -2247,7 +2320,7 @@ fn mark_workspace_unread(state: &State, ws_id: &str) {
             ws.unread = true;
             ws.notify_dot.remove_css_class("limux-notify-dot-hidden");
             ws.notify_dot.add_css_class("limux-notify-dot");
-            ws.notify_label.set_label("Process needs attention");
+            ws.notify_label.set_label(message);
             ws.notify_label.remove_css_class("limux-notify-msg");
             ws.notify_label.add_css_class("limux-notify-msg-unread");
             ws.notify_label.set_visible(true);
@@ -2261,7 +2334,33 @@ fn mark_workspace_unread(state: &State, ws_id: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_workspace_insert_index_for_pinning, favorites_prefix_len};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use super::{
+        clamp_workspace_insert_index_for_pinning, favorites_prefix_len, queue_session_save_request,
+        workspace_notification_message, SessionSaveAccess, SessionSaveRequest,
+    };
+
+    #[derive(Default)]
+    struct TestSessionSaveState {
+        persistence_suspended: bool,
+        save_queued: bool,
+    }
+
+    impl SessionSaveAccess for TestSessionSaveState {
+        fn persistence_suspended(&self) -> bool {
+            self.persistence_suspended
+        }
+
+        fn save_queued(&self) -> bool {
+            self.save_queued
+        }
+
+        fn set_save_queued(&mut self, queued: bool) {
+            self.save_queued = queued;
+        }
+    }
 
     #[test]
     fn favorites_prefix_len_counts_only_leading_favorites() {
@@ -2286,5 +2385,51 @@ mod tests {
         let clamped =
             clamp_workspace_insert_index_for_pinning(&after_removal, true, after_removal.len());
         assert_eq!(clamped, 2);
+    }
+
+    #[test]
+    fn queue_session_save_request_sets_queued_once() {
+        let state = Rc::new(RefCell::new(TestSessionSaveState::default()));
+
+        assert_eq!(
+            queue_session_save_request(&state),
+            SessionSaveRequest::FlushOnIdle
+        );
+        assert!(state.borrow().save_queued);
+        assert_eq!(
+            queue_session_save_request(&state),
+            SessionSaveRequest::Ignore
+        );
+    }
+
+    #[test]
+    fn queue_session_save_request_retries_when_state_is_borrowed() {
+        let state = Rc::new(RefCell::new(TestSessionSaveState::default()));
+        let borrow = state.borrow_mut();
+
+        assert_eq!(
+            queue_session_save_request(&state),
+            SessionSaveRequest::RetryOnIdle
+        );
+
+        drop(borrow);
+        assert!(!state.borrow().save_queued);
+    }
+
+    #[test]
+    fn workspace_notification_message_prefers_title_and_body() {
+        assert_eq!(
+            workspace_notification_message("Codex", "Turn complete"),
+            "Codex: Turn complete"
+        );
+        assert_eq!(workspace_notification_message("Codex", ""), "Codex");
+        assert_eq!(
+            workspace_notification_message("", "Turn complete"),
+            "Turn complete"
+        );
+        assert_eq!(
+            workspace_notification_message("  ", "  "),
+            "Process needs attention"
+        );
     }
 }

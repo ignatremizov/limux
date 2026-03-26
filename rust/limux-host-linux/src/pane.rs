@@ -22,11 +22,13 @@ type PaneSplitCallback = dyn Fn(&gtk::Widget, gtk::Orientation);
 type PaneWidgetCallback = dyn Fn(&gtk::Widget);
 type PaneSignalCallback = dyn Fn();
 type PanePathCallback = dyn Fn(&str);
+type PaneDesktopNotificationCallback = dyn Fn(&str, &str);
 
 pub struct PaneCallbacks {
     pub on_split: Box<PaneSplitCallback>,
     pub on_close_pane: Box<PaneWidgetCallback>,
     pub on_bell: Box<PaneSignalCallback>,
+    pub on_desktop_notification: Box<PaneDesktopNotificationCallback>,
     pub on_pwd_changed: Box<PanePathCallback>,
     pub on_empty: Box<PaneWidgetCallback>,
     pub on_state_changed: Box<PaneSignalCallback>,
@@ -577,6 +579,12 @@ fn add_terminal_tab_inner(
             }),
             on_bell: Box::new(move || {
                 (cb_bell.on_bell)();
+            }),
+            on_desktop_notification: Box::new({
+                let cb_notification = callbacks.clone();
+                move |title: &str, body: &str| {
+                    (cb_notification.on_desktop_notification)(title, body);
+                }
             }),
             on_pwd_changed: Box::new({
                 let cb_pwd = callbacks.clone();

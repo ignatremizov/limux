@@ -364,8 +364,7 @@ fn write_json_map(path: &Path, map: &BTreeMap<String, String>) -> Result<()> {
         .as_nanos();
     let tmp = path.with_extension(format!("tmp-{}-{}", std::process::id(), nonce));
     fs::write(&tmp, encoded).with_context(|| format!("failed to write {}", tmp.display()))?;
-    fs::rename(&tmp, path)
-        .with_context(|| format!("failed to replace {}", path.display()))?;
+    fs::rename(&tmp, path).with_context(|| format!("failed to replace {}", path.display()))?;
     Ok(())
 }
 
@@ -1800,12 +1799,10 @@ async fn run_tmux_compat(client: &mut Client, command: &str, args: &[String]) ->
                 Ok(json!({"ok": true}))
             })
         }
-        "list-buffers" => {
-            with_locked_json_map(&client.socket, "buffers", |buffers, _path| {
-                let text = buffers.keys().cloned().collect::<Vec<_>>().join("\n");
-                Ok(json!({"text": text}))
-            })
-        }
+        "list-buffers" => with_locked_json_map(&client.socket, "buffers", |buffers, _path| {
+            let text = buffers.keys().cloned().collect::<Vec<_>>().join("\n");
+            Ok(json!({"text": text}))
+        }),
         "paste-buffer" => {
             let name =
                 parse_opt(args, "--name").ok_or_else(|| anyhow!("paste-buffer requires --name"))?;

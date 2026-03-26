@@ -281,10 +281,18 @@ pub struct ghostty_action_s {
 // Must be exactly 24 bytes to match the C union.
 #[repr(C)]
 pub union ghostty_action_u {
+    pub desktop_notification: ghostty_action_desktop_notification_s,
     pub set_title: ghostty_action_set_title_s,
     pub pwd: ghostty_action_pwd_s,
     pub child_exited: ghostty_surface_message_childexited_s,
     _padding: [u8; 24],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ghostty_action_desktop_notification_s {
+    pub title: *const c_char,
+    pub body: *const c_char,
 }
 
 #[repr(C)]
