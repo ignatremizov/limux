@@ -19,7 +19,7 @@ https://github.com/user-attachments/assets/6f3047c2-e2b6-49f2-b536-570a1570d0f8
 
 ## Install
 
-Download the latest release from [GitHub Releases](https://github.com/am-will/limux/releases).
+Download the latest release from [GitHub Releases](https://github.com/ignatremizov/limux/releases).
 
 **Debian/Ubuntu (.deb)** — recommended, shows up in app launcher immediately:
 ```bash
@@ -38,6 +38,13 @@ tar xzf limux-*-linux-x86_64.tar.gz
 cd limux-*-linux-x86_64
 sudo ./install.sh
 ```
+
+**Arch Linux (unofficial AUR package)** — community-maintained:
+```bash
+yay -S limux-bin
+```
+
+The AUR package is available at [`limux-bin`](https://aur.archlinux.org/packages/limux-bin).
 
 To uninstall:
 ```bash
@@ -81,6 +88,16 @@ LD_LIBRARY_PATH=../ghostty/zig-out/lib:$LD_LIBRARY_PATH ./target/release/limux
 ```
 
 This builds the binary, bundles `libghostty.so`, icons, and an install script into a tarball.
+
+## Development
+
+Run the canonical local quality gate before committing:
+
+```bash
+./scripts/check.sh
+```
+
+Repository maintainability rules live in [`docs/maintainability.md`](docs/maintainability.md).
 
 ## Keyboard shortcuts
 
