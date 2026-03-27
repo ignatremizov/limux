@@ -32,6 +32,9 @@ type TitleChangedCallback = dyn Fn(&str);
 type PwdChangedCallback = dyn Fn(&str);
 type DesktopNotificationCallback = dyn Fn(&str, &str);
 type VoidCallback = dyn Fn();
+type CallbackCell = Rc<RefCell<TerminalCallbacks>>;
+
+const CALLBACKS_STATE_KEY: &str = "limux-terminal-callbacks";
 
 /// Per-surface state, stored in a global registry keyed by surface pointer.
 struct SurfaceEntry {
@@ -406,6 +409,20 @@ pub struct TerminalCallbacks {
     pub on_split_down: Box<VoidCallback>,
 }
 
+pub fn replace_callbacks(widget: &gtk::Widget, callbacks: TerminalCallbacks) -> bool {
+    let Some(overlay) = widget.downcast_ref::<gtk::Overlay>() else {
+        return false;
+    };
+
+    unsafe {
+        let Some(state) = overlay.data::<CallbackCell>(CALLBACKS_STATE_KEY) else {
+            return false;
+        };
+        *state.as_ref().borrow_mut() = callbacks;
+    }
+    true
+}
+
 /// Create a new Ghostty-powered terminal widget.
 /// Returns an Overlay (GLArea + toast layer) for embedding in the pane.
 pub fn create_terminal(
@@ -423,7 +440,7 @@ pub fn create_terminal(
     gl_area.set_can_focus(true);
 
     let wd = working_directory.map(|s| s.to_string());
-    let callbacks = Rc::new(callbacks);
+    let callbacks = Rc::new(RefCell::new(callbacks));
     let surface_cell: Rc<RefCell<Option<ghostty_surface_t>>> = Rc::new(RefCell::new(None));
     let had_focus = Rc::new(Cell::new(false));
     let clipboard_context_cell: Rc<Cell<*mut ClipboardContext>> =
@@ -434,6 +451,9 @@ pub fn create_terminal(
     overlay.set_child(Some(&gl_area));
     overlay.set_hexpand(true);
     overlay.set_vexpand(true);
+    unsafe {
+        overlay.set_data(CALLBACKS_STATE_KEY, callbacks.clone());
+    }
 
     // On realize: create the Ghostty surface
     {
@@ -515,23 +535,38 @@ pub fn create_terminal(
                         toast_overlay: overlay_for_map.clone(),
                         on_title_changed: Some(Box::new({
                             let cb = callbacks.clone();
-                            move |title| (cb.on_title_changed)(title)
+                            move |title| {
+                                let callbacks = cb.borrow();
+                                (callbacks.on_title_changed)(title);
+                            }
                         })),
                         on_pwd_changed: Some(Box::new({
                             let cb = callbacks.clone();
-                            move |pwd| (cb.on_pwd_changed)(pwd)
+                            move |pwd| {
+                                let callbacks = cb.borrow();
+                                (callbacks.on_pwd_changed)(pwd);
+                            }
                         })),
                         on_desktop_notification: Some(Box::new({
                             let cb = callbacks.clone();
-                            move |title, body| (cb.on_desktop_notification)(title, body)
+                            move |title, body| {
+                                let callbacks = cb.borrow();
+                                (callbacks.on_desktop_notification)(title, body);
+                            }
                         })),
                         on_bell: Some(Box::new({
                             let cb = callbacks.clone();
-                            move || (cb.on_bell)()
+                            move || {
+                                let callbacks = cb.borrow();
+                                (callbacks.on_bell)();
+                            }
                         })),
                         on_close: Some(Box::new({
                             let cb = callbacks.clone();
-                            move || (cb.on_close)()
+                            move || {
+                                let callbacks = cb.borrow();
+                                (callbacks.on_close)();
+                            }
                         })),
                         clipboard_context,
                     },
@@ -856,7 +891,7 @@ fn surface_action(surface: Option<ghostty_surface_t>, action: &str) {
 fn show_terminal_context_menu(
     gl_area: &gtk::GLArea,
     surface: Option<ghostty_surface_t>,
-    callbacks: &Rc<TerminalCallbacks>,
+    callbacks: &CallbackCell,
     x: f64,
     y: f64,
 ) {
@@ -915,11 +950,12 @@ fn show_terminal_context_menu(
 
             btn.connect_clicked(move |_| {
                 pop.popdown();
+                let callbacks = cb.borrow();
                 match label.as_str() {
                     "Copy" => surface_action(surface, "copy_to_clipboard"),
                     "Paste" => surface_action(surface, "paste_from_clipboard"),
-                    "Split Right" => (cb.on_split_right)(),
-                    "Split Down" => (cb.on_split_down)(),
+                    "Split Right" => (callbacks.on_split_right)(),
+                    "Split Down" => (callbacks.on_split_down)(),
                     "Clear" => surface_action(surface, "clear_screen"),
                     _ => {}
                 }

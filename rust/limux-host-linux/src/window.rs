@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -57,12 +57,32 @@ struct AppState {
     sidebar_expanded_width: i32,
     persistence_suspended: bool,
     save_queued: bool,
+    workspace_dragging: Option<String>,
 }
 
 impl AppState {
     fn active_workspace(&self) -> Option<&Workspace> {
         self.workspaces.get(self.active_idx)
     }
+
+    fn workspace_for_widget(&self, widget: &gtk::Widget) -> Option<&Workspace> {
+        self.workspaces
+            .iter()
+            .find(|workspace| widget.is_ancestor(&workspace.root))
+    }
+}
+
+#[derive(Clone)]
+struct WorkspaceSeedSource {
+    workspace_cwd: Option<String>,
+    workspace_folder_path: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TabDragWorkspaceSeed {
+    name: String,
+    cwd: Option<String>,
+    folder_path: Option<String>,
 }
 
 type State = Rc<RefCell<AppState>>;
@@ -325,7 +345,7 @@ fn build_workspace_root(
 ) -> gtk::Widget {
     match layout {
         Some(layout) => build_layout_widget(state, ws_id, working_directory, layout),
-        None => create_pane_for_workspace(state, ws_id, working_directory, None).upcast(),
+        None => create_pane_for_workspace(state, ws_id, working_directory, None, false).upcast(),
     }
 }
 
@@ -337,7 +357,8 @@ fn build_layout_widget(
 ) -> gtk::Widget {
     match layout {
         LayoutNodeState::Pane(pane_state) => {
-            create_pane_for_workspace(state, ws_id, working_directory, Some(pane_state)).upcast()
+            create_pane_for_workspace(state, ws_id, working_directory, Some(pane_state), false)
+                .upcast()
         }
         LayoutNodeState::Split(split_state) => {
             let orientation = match split_state.orientation {
@@ -493,6 +514,10 @@ row:selected .limux-ws-star-btn {
     border-bottom-left-radius: 0;
     border-bottom-right-radius: 0;
     padding-bottom: 4px;
+}
+.limux-tab-drop-target .limux-sidebar-row-box {
+    background: rgba(0, 145, 255, 0.12);
+    border: 1px solid rgba(0, 145, 255, 0.55);
 }
 .limux-sidebar-title {
     color: rgba(255, 255, 255, 0.5);
@@ -683,7 +708,11 @@ pub fn build_window(app: &adw::Application) {
     {
         let btn = new_ws_btn.clone();
         btn_drop.connect_motion(move |_, _, _| {
-            btn.add_css_class("limux-sidebar-btn-trash-hover");
+            if pane::is_tab_dragging() {
+                btn.remove_css_class("limux-sidebar-btn-trash-hover");
+            } else {
+                btn.add_css_class("limux-sidebar-btn-trash-hover");
+            }
             gtk::gdk::DragAction::MOVE
         });
     }
@@ -746,6 +775,7 @@ pub fn build_window(app: &adw::Application) {
         sidebar_expanded_width: SIDEBAR_WIDTH,
         persistence_suspended: false,
         save_queued: false,
+        workspace_dragging: None,
     }));
 
     {
@@ -837,6 +867,9 @@ pub fn build_window(app: &adw::Application) {
             btn.remove_css_class("limux-sidebar-btn-trash");
             btn.remove_css_class("limux-sidebar-btn-trash-hover");
             if let Ok(workspace_id) = value.get::<String>() {
+                if pane::is_tab_dragging() {
+                    return create_workspace_for_tab(&state, &workspace_id);
+                }
                 close_workspace_by_id(&state, &workspace_id);
                 return true;
             }
@@ -1127,6 +1160,54 @@ fn abbreviate_path(path: &str) -> String {
 
 fn favorites_prefix_len(flags: &[bool]) -> usize {
     flags.iter().take_while(|is_favorite| **is_favorite).count()
+}
+
+fn tab_drag_workspace_seed(
+    source: WorkspaceSeedSource,
+    title: &str,
+    tab_cwd: Option<String>,
+) -> TabDragWorkspaceSeed {
+    let name = {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            "Workspace".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    let cwd = tab_cwd
+        .clone()
+        .or_else(|| source.workspace_folder_path.clone())
+        .or(source.workspace_cwd.clone());
+    let folder_path = tab_cwd
+        .filter(|cwd| !cwd.trim().is_empty())
+        .or(source.workspace_folder_path)
+        .filter(|path| !path.trim().is_empty());
+
+    TabDragWorkspaceSeed {
+        name,
+        cwd,
+        folder_path,
+    }
+}
+
+fn next_active_workspace_index(
+    remaining_workspace_ids: &[&str],
+    preferred_active_workspace_id: Option<&str>,
+    removed_idx: usize,
+) -> usize {
+    if remaining_workspace_ids.is_empty() {
+        return 0;
+    }
+    if let Some(preferred_id) = preferred_active_workspace_id {
+        if let Some(idx) = remaining_workspace_ids
+            .iter()
+            .position(|workspace_id| *workspace_id == preferred_id)
+        {
+            return idx;
+        }
+    }
+    removed_idx.min(remaining_workspace_ids.len() - 1)
 }
 
 fn show_workspace_context_menu(state: &State, workspace_id: &str, row: &gtk::ListBoxRow) {
@@ -1489,6 +1570,109 @@ fn toggle_workspace_favorite(state: &State, workspace_id: &str) {
     request_session_save(state);
 }
 
+fn handle_tab_drop_to_workspace(state: &State, target_workspace_id: &str, payload: &str) -> bool {
+    let Some((pane_id, tab_id)) = payload.split_once(':') else {
+        return false;
+    };
+    let Ok(source_pane_id) = pane_id.parse::<u32>() else {
+        return false;
+    };
+    let Some(source_pane) = pane::find_pane_widget_by_id(source_pane_id) else {
+        return false;
+    };
+
+    let (target_idx, target_row, target_pane) = {
+        let app_state = state.borrow();
+        let Some((idx, workspace)) = app_state
+            .workspaces
+            .iter()
+            .enumerate()
+            .find(|(_, workspace)| workspace.id == target_workspace_id)
+        else {
+            return false;
+        };
+        (
+            idx,
+            workspace.sidebar_row.clone(),
+            find_leaf_pane(&workspace.root, gtk::Orientation::Horizontal, true),
+        )
+    };
+
+    switch_workspace(state, target_idx);
+    state.borrow().sidebar_list.select_row(Some(&target_row));
+    pane::move_tab_to_pane(&source_pane, tab_id, &target_pane)
+}
+
+fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
+    let Some((pane_id, tab_id)) = payload.split_once(':') else {
+        return false;
+    };
+    let Ok(source_pane_id) = pane_id.parse::<u32>() else {
+        return false;
+    };
+    let Some(source_pane) = pane::find_pane_widget_by_id(source_pane_id) else {
+        return false;
+    };
+
+    let title = pane::tab_title(&source_pane, tab_id).unwrap_or_else(|| "Workspace".to_string());
+    let tab_cwd = pane::tab_working_directory(&source_pane, tab_id);
+    let seed = {
+        let app_state = state.borrow();
+        let source = app_state
+            .workspace_for_widget(&source_pane)
+            .map(|workspace| WorkspaceSeedSource {
+                workspace_cwd: workspace.cwd.borrow().clone(),
+                workspace_folder_path: workspace.folder_path.clone(),
+            })
+            .unwrap_or(WorkspaceSeedSource {
+                workspace_cwd: None,
+                workspace_folder_path: None,
+            });
+        tab_drag_workspace_seed(source, &title, tab_cwd)
+    };
+
+    let new_workspace_id = uuid::Uuid::new_v4().to_string();
+    let stack_name = format!("ws-{new_workspace_id}");
+    let root = create_pane_for_workspace(state, &new_workspace_id, seed.cwd.as_deref(), None, true);
+
+    let (row, name_label, favorite_button, notify_dot, notify_label, path_label) =
+        build_sidebar_row(&seed.name, seed.folder_path.as_deref());
+    install_workspace_row_interactions(state, &new_workspace_id, &row, &favorite_button);
+
+    {
+        let mut app_state = state.borrow_mut();
+        app_state.stack.add_named(&root, Some(&stack_name));
+        app_state.sidebar_list.append(&row);
+        app_state.workspaces.push(Workspace {
+            id: new_workspace_id.clone(),
+            name: seed.name.clone(),
+            root: root.clone().upcast(),
+            sidebar_row: row.clone(),
+            name_label,
+            favorite_button,
+            notify_dot,
+            notify_label,
+            unread: false,
+            favorite: false,
+            cwd: Rc::new(RefCell::new(seed.cwd.clone())),
+            folder_path: seed.folder_path.clone(),
+            path_label,
+        });
+        app_state.active_idx = app_state.workspaces.len() - 1;
+        app_state.stack.set_visible_child_name(&stack_name);
+    }
+
+    state.borrow().sidebar_list.select_row(Some(&row));
+
+    if pane::move_tab_to_pane(&source_pane, tab_id, &root.clone().upcast()) {
+        request_session_save(state);
+        return true;
+    }
+
+    close_workspace_by_id_internal(state, &new_workspace_id, false, None);
+    false
+}
+
 fn install_workspace_row_interactions(
     state: &State,
     workspace_id: &str,
@@ -1520,20 +1704,30 @@ fn install_workspace_row_interactions(
     }
     {
         let state = state.clone();
-        drag_source.connect_drag_begin(move |_, _| {
-            let s = state.borrow();
+        let row = row.clone();
+        let workspace_id = workspace_id.to_string();
+        drag_source.connect_drag_begin(move |source, _| {
+            let mut s = state.borrow_mut();
+            s.workspace_dragging = Some(workspace_id.clone());
             s.new_ws_btn.set_label("\u{1F5D1}\u{FE0E}");
             s.new_ws_btn.add_css_class("limux-sidebar-btn-trash");
+            drop(s);
+            pane::set_workspace_dragging_all(true);
+            let icon = gtk::WidgetPaintable::new(Some(&row));
+            source.set_icon(Some(&icon), 0, 0);
         });
     }
     {
         let state = state.clone();
         drag_source.connect_drag_end(move |_, _, _| {
-            let s = state.borrow();
+            let mut s = state.borrow_mut();
+            s.workspace_dragging = None;
             s.new_ws_btn.set_label("New Workspace");
             s.new_ws_btn.remove_css_class("limux-sidebar-btn-trash");
             s.new_ws_btn
                 .remove_css_class("limux-sidebar-btn-trash-hover");
+            drop(s);
+            pane::set_workspace_dragging_all(false);
         });
     }
     row.add_controller(drag_source);
@@ -1541,40 +1735,112 @@ fn install_workspace_row_interactions(
     // Drop target for sidebar reordering with visual feedback.
     let drop_target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
     drop_target.set_preload(true);
+    let hover_timer: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+    let drop_handled = Rc::new(Cell::new(false));
     {
         let r = row.clone();
+        let state = state.clone();
+        let hover_timer = hover_timer.clone();
+        let target_workspace_id = workspace_id.to_string();
+        let drop_handled = drop_handled.clone();
         drop_target.connect_motion(move |_, _x, y| {
+            drop_handled.set(false);
             let h = r.height() as f64;
             r.remove_css_class("limux-drop-above");
             r.remove_css_class("limux-drop-below");
-            if y < h / 2.0 {
-                r.add_css_class("limux-drop-above");
-            } else {
-                r.add_css_class("limux-drop-below");
+            r.remove_css_class("limux-tab-drop-target");
+
+            let dragged_workspace = state.borrow().workspace_dragging.clone();
+            if pane::is_tab_dragging() {
+                if dragged_workspace.is_none() {
+                    r.add_css_class("limux-tab-drop-target");
+                }
+            } else if matches!(
+                dragged_workspace.as_deref(),
+                Some(dragged_workspace_id) if dragged_workspace_id != target_workspace_id
+            ) {
+                if y < h / 2.0 {
+                    r.add_css_class("limux-drop-above");
+                } else {
+                    r.add_css_class("limux-drop-below");
+                }
+            }
+
+            if hover_timer.borrow().is_none() && pane::is_tab_dragging() {
+                let state = state.clone();
+                let target_workspace_id = target_workspace_id.clone();
+                let hover_timer = hover_timer.clone();
+                let drop_handled = drop_handled.clone();
+                let timer_for_callback = hover_timer.clone();
+                let source = glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(500),
+                    move || {
+                        *timer_for_callback.borrow_mut() = None;
+                        if drop_handled.get() {
+                            return;
+                        }
+                        let (target_idx, sidebar_row, sidebar_list) = {
+                            let app_state = state.borrow();
+                            let idx = app_state
+                                .workspaces
+                                .iter()
+                                .position(|workspace| workspace.id == target_workspace_id);
+                            let sidebar_row = idx.and_then(|idx| {
+                                app_state
+                                    .workspaces
+                                    .get(idx)
+                                    .map(|workspace| workspace.sidebar_row.clone())
+                            });
+                            (idx, sidebar_row, app_state.sidebar_list.clone())
+                        };
+                        if let Some(target_idx) = target_idx {
+                            switch_workspace(&state, target_idx);
+                        }
+                        if let Some(sidebar_row) = sidebar_row {
+                            sidebar_list.select_row(Some(&sidebar_row));
+                        }
+                    },
+                );
+                *hover_timer.borrow_mut() = Some(source);
             }
             gtk::gdk::DragAction::MOVE
         });
     }
     {
         let r = row.clone();
+        let hover_timer = hover_timer.clone();
         drop_target.connect_leave(move |_| {
             r.remove_css_class("limux-drop-above");
             r.remove_css_class("limux-drop-below");
+            r.remove_css_class("limux-tab-drop-target");
+            if let Some(source) = hover_timer.borrow_mut().take() {
+                source.remove();
+            }
         });
     }
     {
         let state = state.clone();
         let target_workspace_id = workspace_id.to_string();
         let r = row.clone();
+        let hover_timer = hover_timer.clone();
+        let drop_handled = drop_handled.clone();
         drop_target.connect_drop(move |_dt, value, _, y| {
+            drop_handled.set(true);
             r.remove_css_class("limux-drop-above");
             r.remove_css_class("limux-drop-below");
+            r.remove_css_class("limux-tab-drop-target");
+            if let Some(source) = hover_timer.borrow_mut().take() {
+                source.remove();
+            }
             let drop_below = y >= r.height() as f64 / 2.0;
-            if let Ok(source_workspace_id) = value.get::<String>() {
-                if source_workspace_id != target_workspace_id {
+            if let Ok(payload) = value.get::<String>() {
+                if pane::is_tab_dragging() {
+                    return handle_tab_drop_to_workspace(&state, &target_workspace_id, &payload);
+                }
+                if payload != target_workspace_id {
                     return reorder_workspace_by_id(
                         &state,
-                        &source_workspace_id,
+                        &payload,
                         &target_workspace_id,
                         drop_below,
                     );
@@ -1706,17 +1972,20 @@ fn create_pane_for_workspace(
     ws_id: &str,
     working_directory: Option<&str>,
     initial_state: Option<&PaneState>,
+    skip_default_tab: bool,
 ) -> gtk::Box {
     let state_for_split = state.clone();
     let state_for_close = state.clone();
     let state_for_bell = state.clone();
     let state_for_pwd = state.clone();
     let state_for_empty = state.clone();
+    let state_for_split_with_tab = state.clone();
     let ws_id_split = ws_id.to_string();
     let ws_id_close = ws_id.to_string();
     let ws_id_bell = ws_id.to_string();
     let ws_id_pwd = ws_id.to_string();
     let ws_id_empty = ws_id.to_string();
+    let ws_id_split_with_tab = ws_id.to_string();
 
     let callbacks = Rc::new(PaneCallbacks {
         on_split: Box::new(move |pane_widget, orientation| {
@@ -1763,9 +2032,27 @@ fn create_pane_for_workspace(
             let state = state.clone();
             move || request_session_save(&state)
         }),
+        on_split_with_tab: Box::new(
+            move |source_pane, target_pane, orientation, tab_id, new_pane_first| {
+                handle_split_with_tab(
+                    &state_for_split_with_tab,
+                    &ws_id_split_with_tab,
+                    source_pane,
+                    target_pane,
+                    orientation,
+                    &tab_id,
+                    new_pane_first,
+                );
+            },
+        ),
     });
 
-    pane::create_pane(callbacks, working_directory, initial_state)
+    pane::create_pane(
+        callbacks,
+        working_directory,
+        initial_state,
+        skip_default_tab,
+    )
 }
 
 fn close_workspace(state: &State) {
@@ -1779,10 +2066,22 @@ fn close_workspace(state: &State) {
 }
 
 fn close_workspace_by_id(state: &State, id: &str) {
+    close_workspace_by_id_internal(state, id, true, None);
+}
+
+fn close_workspace_by_id_internal(
+    state: &State,
+    id: &str,
+    persist: bool,
+    preferred_active_workspace_id: Option<&str>,
+) {
     let mut s = state.borrow_mut();
     let Some(idx) = s.workspaces.iter().position(|w| w.id == id) else {
         return;
     };
+    let desired_active_workspace_id = preferred_active_workspace_id
+        .map(ToOwned::to_owned)
+        .or_else(|| s.active_workspace().map(|workspace| workspace.id.clone()));
 
     let ws = s.workspaces.remove(idx);
     s.stack.remove(&ws.root);
@@ -1791,11 +2090,22 @@ fn close_workspace_by_id(state: &State, id: &str) {
     if s.workspaces.is_empty() {
         s.active_idx = 0;
         drop(s);
-        request_session_save(state);
+        if persist {
+            request_session_save(state);
+        }
         return;
     }
 
-    let new_idx = idx.min(s.workspaces.len() - 1);
+    let remaining_workspace_ids: Vec<&str> = s
+        .workspaces
+        .iter()
+        .map(|workspace| workspace.id.as_str())
+        .collect();
+    let new_idx = next_active_workspace_index(
+        &remaining_workspace_ids,
+        desired_active_workspace_id.as_deref(),
+        idx,
+    );
     s.active_idx = new_idx;
 
     let stack_name = format!("ws-{}", s.workspaces[new_idx].id);
@@ -1806,7 +2116,9 @@ fn close_workspace_by_id(state: &State, id: &str) {
     drop(s);
 
     sidebar_list.select_row(Some(&row));
-    request_session_save(state);
+    if persist {
+        request_session_save(state);
+    }
 }
 
 fn switch_workspace(state: &State, idx: usize) {
@@ -1984,7 +2296,7 @@ fn split_pane(
     ws_id: &str,
     pane_widget: &gtk::Widget,
     orientation: gtk::Orientation,
-) {
+) -> gtk::Widget {
     // Use the workspace's folder_path (or current cwd) for the new pane
     let wd = {
         let s = state.borrow();
@@ -1993,7 +2305,7 @@ fn split_pane(
             .find(|w| w.id == ws_id)
             .and_then(|ws| ws.folder_path.clone().or_else(|| ws.cwd.borrow().clone()))
     };
-    let new_pane = create_pane_for_workspace(state, ws_id, wd.as_deref(), None);
+    let new_pane = create_pane_for_workspace(state, ws_id, wd.as_deref(), None, false);
 
     let parent = pane_widget.parent();
 
@@ -2048,6 +2360,92 @@ fn split_pane(
         });
     }
     request_session_save(state);
+    new_pane.upcast()
+}
+
+fn handle_split_with_tab(
+    state: &State,
+    ws_id: &str,
+    source_pane: &gtk::Widget,
+    target_pane: &gtk::Widget,
+    orientation: gtk::Orientation,
+    tab_id: &str,
+    new_pane_first: bool,
+) {
+    if pane::tab_title(source_pane, tab_id).is_none() {
+        return;
+    }
+
+    let wd = {
+        let s = state.borrow();
+        s.workspaces
+            .iter()
+            .find(|w| w.id == ws_id)
+            .and_then(|ws| ws.folder_path.clone().or_else(|| ws.cwd.borrow().clone()))
+    };
+    let new_pane = create_pane_for_workspace(state, ws_id, wd.as_deref(), None, true);
+    let parent = target_pane.parent();
+
+    let new_paned = gtk::Paned::builder()
+        .orientation(orientation)
+        .hexpand(true)
+        .vexpand(true)
+        .build();
+    update_split_ratio_state(&new_paned, layout_state::DEFAULT_SPLIT_RATIO);
+    attach_split_position_persistence(state, &new_paned);
+
+    if let Some(parent) = parent {
+        if let Some(paned_parent) = parent.downcast_ref::<gtk::Paned>() {
+            let is_start = paned_parent
+                .start_child()
+                .map(|c| c == *target_pane)
+                .unwrap_or(false);
+            if is_start {
+                paned_parent.set_start_child(Some(&new_paned));
+            } else {
+                paned_parent.set_end_child(Some(&new_paned));
+            }
+        } else if let Some(stack) = parent.downcast_ref::<gtk::Stack>() {
+            let page_name = format!("ws-{ws_id}");
+            stack.remove(target_pane);
+            stack.add_named(&new_paned, Some(&page_name));
+            stack.set_visible_child_name(&page_name);
+            let mut s = state.borrow_mut();
+            if let Some(ws) = s.workspaces.iter_mut().find(|w| w.id == ws_id) {
+                ws.root = new_paned.clone().upcast();
+            }
+        }
+    }
+
+    if new_pane_first {
+        new_paned.set_start_child(Some(&new_pane));
+        new_paned.set_end_child(Some(target_pane));
+    } else {
+        new_paned.set_start_child(Some(target_pane));
+        new_paned.set_end_child(Some(&new_pane));
+    }
+
+    {
+        let np = new_paned.clone();
+        glib::idle_add_local_once(move || {
+            let alloc = np.allocation();
+            let size = if orientation == gtk::Orientation::Horizontal {
+                alloc.width()
+            } else {
+                alloc.height()
+            };
+            if size > 0 {
+                np.set_position(size / 2);
+            }
+        });
+    }
+
+    let new_pane_widget: gtk::Widget = new_pane.clone().upcast();
+    if pane::move_tab_to_pane(source_pane, tab_id, &new_pane_widget) {
+        request_session_save(state);
+    } else {
+        remove_pane(state, ws_id, &new_pane_widget);
+    }
 }
 
 fn remove_pane(state: &State, ws_id: &str, pane_widget: &gtk::Widget) {
@@ -2338,8 +2736,10 @@ mod tests {
     use std::rc::Rc;
 
     use super::{
-        clamp_workspace_insert_index_for_pinning, favorites_prefix_len, queue_session_save_request,
+        clamp_workspace_insert_index_for_pinning, favorites_prefix_len,
+        next_active_workspace_index, queue_session_save_request, tab_drag_workspace_seed,
         workspace_notification_message, SessionSaveAccess, SessionSaveRequest,
+        TabDragWorkspaceSeed, WorkspaceSeedSource,
     };
 
     #[derive(Default)]
@@ -2385,6 +2785,61 @@ mod tests {
         let clamped =
             clamp_workspace_insert_index_for_pinning(&after_removal, true, after_removal.len());
         assert_eq!(clamped, 2);
+    }
+
+    #[test]
+    fn next_active_workspace_index_preserves_preferred_workspace() {
+        let remaining = ["destination", "other"];
+        assert_eq!(
+            next_active_workspace_index(&remaining, Some("destination"), 0),
+            0
+        );
+    }
+
+    #[test]
+    fn next_active_workspace_index_falls_back_to_removed_slot() {
+        let remaining = ["first", "last"];
+        assert_eq!(next_active_workspace_index(&remaining, Some("gone"), 1), 1);
+    }
+
+    #[test]
+    fn tab_drag_workspace_seed_prefers_terminal_cwd() {
+        let seed = tab_drag_workspace_seed(
+            WorkspaceSeedSource {
+                workspace_cwd: Some("/workspace/current".to_string()),
+                workspace_folder_path: Some("/workspace/root".to_string()),
+            },
+            " shell ",
+            Some("/workspace/current/subdir".to_string()),
+        );
+        assert_eq!(
+            seed,
+            TabDragWorkspaceSeed {
+                name: "shell".to_string(),
+                cwd: Some("/workspace/current/subdir".to_string()),
+                folder_path: Some("/workspace/current/subdir".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn tab_drag_workspace_seed_uses_workspace_directory_for_non_terminal_tabs() {
+        let seed = tab_drag_workspace_seed(
+            WorkspaceSeedSource {
+                workspace_cwd: Some("/workspace/current".to_string()),
+                workspace_folder_path: Some("/workspace/root".to_string()),
+            },
+            "",
+            None,
+        );
+        assert_eq!(
+            seed,
+            TabDragWorkspaceSeed {
+                name: "Workspace".to_string(),
+                cwd: Some("/workspace/root".to_string()),
+                folder_path: Some("/workspace/root".to_string()),
+            }
+        );
     }
 
     #[test]
