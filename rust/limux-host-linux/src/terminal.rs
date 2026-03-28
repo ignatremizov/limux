@@ -11,6 +11,7 @@ use std::os::unix::ffi::OsStringExt;
 use std::ptr;
 use std::rc::Rc;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use limux_ghostty_sys::*;
 
@@ -30,11 +31,8 @@ static GHOSTTY: OnceLock<GhosttyState> = OnceLock::new();
 
 type TitleChangedCallback = dyn Fn(&str);
 type PwdChangedCallback = dyn Fn(&str);
-type DesktopNotificationCallback = dyn Fn(&str, &str);
 type VoidCallback = dyn Fn();
-type CallbackCell = Rc<RefCell<TerminalCallbacks>>;
-
-const CALLBACKS_STATE_KEY: &str = "limux-terminal-callbacks";
+type WidgetCallback = dyn Fn(&gtk::Widget);
 
 /// Per-surface state, stored in a global registry keyed by surface pointer.
 struct SurfaceEntry {
@@ -42,7 +40,6 @@ struct SurfaceEntry {
     toast_overlay: gtk::Overlay,
     on_title_changed: Option<Box<TitleChangedCallback>>,
     on_pwd_changed: Option<Box<PwdChangedCallback>>,
-    on_desktop_notification: Option<Box<DesktopNotificationCallback>>,
     on_bell: Option<Box<VoidCallback>>,
     on_close: Option<Box<VoidCallback>>,
     clipboard_context: *mut ClipboardContext,
@@ -175,37 +172,6 @@ unsafe extern "C" fn ghostty_action_cb(
                         }
                     });
                 }
-            }
-            true
-        }
-        GHOSTTY_ACTION_DESKTOP_NOTIFICATION => {
-            if target.tag == GHOSTTY_TARGET_SURFACE {
-                let surface_key = unsafe { target.target.surface } as usize;
-                let title_ptr = unsafe { action.action.desktop_notification.title };
-                let body_ptr = unsafe { action.action.desktop_notification.body };
-                let title = if title_ptr.is_null() {
-                    String::new()
-                } else {
-                    unsafe { std::ffi::CStr::from_ptr(title_ptr) }
-                        .to_str()
-                        .unwrap_or("")
-                        .to_string()
-                };
-                let body = if body_ptr.is_null() {
-                    String::new()
-                } else {
-                    unsafe { std::ffi::CStr::from_ptr(body_ptr) }
-                        .to_str()
-                        .unwrap_or("")
-                        .to_string()
-                };
-                SURFACE_MAP.with(|map| {
-                    if let Some(entry) = map.borrow().get(&surface_key) {
-                        if let Some(cb) = &entry.on_desktop_notification {
-                            cb(&title, &body);
-                        }
-                    }
-                });
             }
             true
         }
@@ -402,25 +368,11 @@ unsafe extern "C" fn ghostty_close_surface_cb(userdata: *mut c_void, _process_al
 pub struct TerminalCallbacks {
     pub on_title_changed: Box<TitleChangedCallback>,
     pub on_pwd_changed: Box<PwdChangedCallback>,
-    pub on_desktop_notification: Box<DesktopNotificationCallback>,
     pub on_bell: Box<VoidCallback>,
     pub on_close: Box<VoidCallback>,
     pub on_split_right: Box<VoidCallback>,
     pub on_split_down: Box<VoidCallback>,
-}
-
-pub fn replace_callbacks(widget: &gtk::Widget, callbacks: TerminalCallbacks) -> bool {
-    let Some(overlay) = widget.downcast_ref::<gtk::Overlay>() else {
-        return false;
-    };
-
-    unsafe {
-        let Some(state) = overlay.data::<CallbackCell>(CALLBACKS_STATE_KEY) else {
-            return false;
-        };
-        *state.as_ref().borrow_mut() = callbacks;
-    }
-    true
+    pub on_open_keybinds: Box<WidgetCallback>,
 }
 
 /// Create a new Ghostty-powered terminal widget.
@@ -440,7 +392,7 @@ pub fn create_terminal(
     gl_area.set_can_focus(true);
 
     let wd = working_directory.map(|s| s.to_string());
-    let callbacks = Rc::new(RefCell::new(callbacks));
+    let callbacks = Rc::new(callbacks);
     let surface_cell: Rc<RefCell<Option<ghostty_surface_t>>> = Rc::new(RefCell::new(None));
     let had_focus = Rc::new(Cell::new(false));
     let clipboard_context_cell: Rc<Cell<*mut ClipboardContext>> =
@@ -451,9 +403,6 @@ pub fn create_terminal(
     overlay.set_child(Some(&gl_area));
     overlay.set_hexpand(true);
     overlay.set_vexpand(true);
-    unsafe {
-        overlay.set_data(CALLBACKS_STATE_KEY, callbacks.clone());
-    }
 
     // On realize: create the Ghostty surface
     {
@@ -535,38 +484,19 @@ pub fn create_terminal(
                         toast_overlay: overlay_for_map.clone(),
                         on_title_changed: Some(Box::new({
                             let cb = callbacks.clone();
-                            move |title| {
-                                let callbacks = cb.borrow();
-                                (callbacks.on_title_changed)(title);
-                            }
+                            move |title| (cb.on_title_changed)(title)
                         })),
                         on_pwd_changed: Some(Box::new({
                             let cb = callbacks.clone();
-                            move |pwd| {
-                                let callbacks = cb.borrow();
-                                (callbacks.on_pwd_changed)(pwd);
-                            }
-                        })),
-                        on_desktop_notification: Some(Box::new({
-                            let cb = callbacks.clone();
-                            move |title, body| {
-                                let callbacks = cb.borrow();
-                                (callbacks.on_desktop_notification)(title, body);
-                            }
+                            move |pwd| (cb.on_pwd_changed)(pwd)
                         })),
                         on_bell: Some(Box::new({
                             let cb = callbacks.clone();
-                            move || {
-                                let callbacks = cb.borrow();
-                                (callbacks.on_bell)();
-                            }
+                            move || (cb.on_bell)()
                         })),
                         on_close: Some(Box::new({
                             let cb = callbacks.clone();
-                            move || {
-                                let callbacks = cb.borrow();
-                                (callbacks.on_close)();
-                            }
+                            move || (cb.on_close)()
                         })),
                         clipboard_context,
                     },
@@ -807,7 +737,8 @@ pub fn create_terminal(
         gl_area.add_controller(focus_ctrl);
     }
 
-    // Accept file drops from the desktop and paste their shell-escaped paths.
+    // File drop: accept files dragged from a file manager and paste their
+    // shell-escaped paths into the terminal.
     {
         let surface_cell = surface_cell.clone();
         let drop_target = gtk::DropTarget::new(
@@ -891,7 +822,7 @@ fn surface_action(surface: Option<ghostty_surface_t>, action: &str) {
 fn show_terminal_context_menu(
     gl_area: &gtk::GLArea,
     surface: Option<ghostty_surface_t>,
-    callbacks: &CallbackCell,
+    callbacks: &Rc<TerminalCallbacks>,
     x: f64,
     y: f64,
 ) {
@@ -911,6 +842,7 @@ fn show_terminal_context_menu(
         ("---", false),
         ("Split Right", true),
         ("Split Down", true),
+        ("Keybinds", true),
         ("---", false),
         ("Clear", true),
     ];
@@ -947,15 +879,22 @@ fn show_terminal_context_menu(
             let label = btn.label().unwrap_or_default().to_string();
             let pop = popover.clone();
             let cb = callbacks.clone();
+            let gl_area = gl_area.clone();
 
             btn.connect_clicked(move |_| {
                 pop.popdown();
-                let callbacks = cb.borrow();
                 match label.as_str() {
                     "Copy" => surface_action(surface, "copy_to_clipboard"),
                     "Paste" => surface_action(surface, "paste_from_clipboard"),
-                    "Split Right" => (callbacks.on_split_right)(),
-                    "Split Down" => (callbacks.on_split_down)(),
+                    "Split Right" => (cb.on_split_right)(),
+                    "Split Down" => (cb.on_split_down)(),
+                    "Keybinds" => {
+                        let anchor: gtk::Widget = gl_area.clone().upcast();
+                        let cb = cb.clone();
+                        glib::timeout_add_local_once(Duration::from_millis(80), move || {
+                            (cb.on_open_keybinds)(&anchor);
+                        });
+                    }
                     "Clear" => surface_action(surface, "clear_screen"),
                     _ => {}
                 }
@@ -1168,8 +1107,10 @@ fn dropped_file_text(file_list: &gtk::gdk::FileList) -> Option<CString> {
     )
 }
 
-fn shell_escape_bytes(bytes: &[u8]) -> Vec<u8> {
-    Bash::quote_vec(bytes)
+/// Bash-escape a path so it can be safely pasted into the terminal without
+/// sending raw control bytes to Ghostty.
+fn shell_escape_bytes(s: &[u8]) -> Vec<u8> {
+    Bash::quote_vec(s)
 }
 
 fn shell_escape_joined_bytes<I, B>(paths: I) -> Option<CString>
@@ -1178,6 +1119,7 @@ where
     B: AsRef<[u8]>,
 {
     let mut text = Vec::new();
+
     for path in paths {
         if !text.is_empty() {
             text.push(b' ');
@@ -1280,16 +1222,18 @@ mod tests {
 
     #[test]
     fn shell_escape_preserves_non_utf8_bytes() {
+        let path = b"/home/user/\xff\xfefile.txt";
         assert_eq!(
-            shell_escape_bytes(b"/home/user/\xff\xfefile.txt"),
+            shell_escape_bytes(path),
             b"$'/home/user/\\xFF\\xFEfile.txt'"
         );
     }
 
     #[test]
     fn shell_escape_hex_escapes_terminal_control_bytes() {
+        let path = b"/tmp/line\nbreak\tand\x03escape\x1b";
         assert_eq!(
-            shell_escape_bytes(b"/tmp/line\nbreak\tand\x03escape\x1b"),
+            shell_escape_bytes(path),
             b"$'/tmp/line\\nbreak\\tand\\x03escape\\e'"
         );
     }

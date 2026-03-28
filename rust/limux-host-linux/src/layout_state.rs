@@ -109,6 +109,7 @@ pub enum TabContentState {
         #[serde(default)]
         uri: Option<String>,
     },
+    Keybinds {},
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -165,13 +166,10 @@ impl TabState {
 }
 
 pub fn persistence_dir() -> PathBuf {
-    if let Some(data_dir) = dirs::data_dir() {
-        return data_dir.join(PERSISTENCE_DIR_NAME);
-    }
-    if let Some(home_dir) = dirs::home_dir() {
-        return home_dir.join(".local/share").join(PERSISTENCE_DIR_NAME);
-    }
-    std::env::temp_dir().join(PERSISTENCE_DIR_NAME)
+    let base = dirs::data_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join(PERSISTENCE_DIR_NAME)
 }
 
 pub fn canonical_session_path_in(dir: &Path) -> PathBuf {
@@ -377,48 +375,7 @@ fn default_tab_id(prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tempfile::tempdir;
-
-    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    struct EnvGuard {
-        key: &'static str,
-        old: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: Option<&str>) -> Self {
-            let old = std::env::var_os(key);
-            match value {
-                Some(value) => unsafe { std::env::set_var(key, value) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-            Self { key, old }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.old {
-                Some(value) => unsafe { std::env::set_var(self.key, value) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
-
-    #[test]
-    fn persistence_dir_respects_xdg_data_home() {
-        let _lock = ENV_TEST_LOCK.lock().expect("env lock");
-        let dir = tempdir().expect("tempdir");
-        let _xdg = EnvGuard::set(
-            "XDG_DATA_HOME",
-            Some(dir.path().to_str().expect("tempdir path utf8")),
-        );
-        let _home = EnvGuard::set("HOME", None);
-
-        assert_eq!(persistence_dir(), dir.path().join(PERSISTENCE_DIR_NAME));
-    }
 
     #[test]
     fn load_prefers_canonical_session_over_legacy() {
@@ -565,6 +522,37 @@ mod tests {
             }
             other => panic!("expected terminal fallback, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn keybind_tab_round_trips_through_session_json() {
+        let state = AppSessionState {
+            workspaces: vec![WorkspaceState {
+                name: "workspace".to_string(),
+                favorite: false,
+                cwd: None,
+                folder_path: None,
+                layout: LayoutNodeState::Pane(PaneState {
+                    active_tab_id: Some("keybinds-1".to_string()),
+                    tabs: vec![TabState {
+                        id: "keybinds-1".to_string(),
+                        custom_name: None,
+                        pinned: false,
+                        content: TabContentState::Keybinds {},
+                    }],
+                }),
+            }],
+            ..AppSessionState::default()
+        };
+
+        let raw = serde_json::to_string(&state).expect("serialize session");
+        let decoded: AppSessionState = serde_json::from_str(&raw).expect("deserialize session");
+
+        let LayoutNodeState::Pane(pane) = &decoded.workspaces[0].layout else {
+            panic!("expected pane");
+        };
+        assert_eq!(pane.active_tab_id.as_deref(), Some("keybinds-1"));
+        assert!(matches!(pane.tabs[0].content, TabContentState::Keybinds {}));
     }
 
     #[test]

@@ -1,5 +1,7 @@
+mod keybind_editor;
 mod layout_state;
 mod pane;
+mod shortcut_config;
 mod terminal;
 mod window;
 
@@ -95,14 +97,6 @@ fn main() {
     let app = adw::Application::builder().application_id(APP_ID).build();
 
     app.connect_activate(window::build_window);
-
-    // Global keyboard shortcuts
-    app.set_accels_for_action("win.new-workspace", &["<Ctrl><Shift>n"]);
-    app.set_accels_for_action("win.close-workspace", &["<Ctrl><Shift>w"]);
-    app.set_accels_for_action("win.toggle-sidebar", &["<Ctrl>b"]);
-    app.set_accels_for_action("win.next-workspace", &["<Ctrl>Page_Down"]);
-    app.set_accels_for_action("win.prev-workspace", &["<Ctrl>Page_Up"]);
-
     app.run();
 }
 
