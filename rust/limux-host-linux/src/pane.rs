@@ -365,6 +365,39 @@ pub fn cycle_tab_in_pane(pane_widget: &gtk::Widget, delta: i32) {
     (internals.callbacks.on_state_changed)();
 }
 
+pub fn focus_active_tab_in_pane(pane_widget: &gtk::Widget) -> bool {
+    let outer = match pane_widget.downcast_ref::<gtk::Box>() {
+        Some(outer) => outer,
+        None => return false,
+    };
+    let internals: Rc<PaneInternals> = unsafe {
+        match outer.data::<Rc<PaneInternals>>("limux-pane-internals") {
+            Some(ptr) => ptr.as_ref().clone(),
+            None => return false,
+        }
+    };
+
+    let target_tab_id = {
+        let tab_state = internals.tab_state.borrow();
+        tab_state
+            .active_tab
+            .clone()
+            .or_else(|| tab_state.tabs.first().map(|entry| entry.id.clone()))
+    };
+
+    let Some(tab_id) = target_tab_id else {
+        return false;
+    };
+
+    activate_tab(
+        &internals.tab_strip,
+        &internals.content_stack,
+        &internals.tab_state,
+        &tab_id,
+    );
+    true
+}
+
 // ---------------------------------------------------------------------------
 // Internal tab state
 // ---------------------------------------------------------------------------
