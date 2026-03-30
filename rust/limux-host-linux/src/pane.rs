@@ -38,6 +38,7 @@ pub struct PaneCallbacks {
     pub on_pwd_changed: Box<PanePathCallback>,
     pub on_empty: Box<PaneWidgetCallback>,
     pub on_state_changed: Box<PaneSignalCallback>,
+    pub hover_terminal_focus: bool,
 }
 
 #[derive(Clone)]
@@ -725,8 +726,13 @@ fn add_terminal_tab_inner(
         }
     };
 
-    let term = terminal::create_terminal(working_directory, term_callbacks);
-
+    let term = terminal::create_terminal(
+        working_directory,
+        terminal::TerminalOptions {
+            hover_focus: callbacks.hover_terminal_focus,
+        },
+        term_callbacks,
+    );
     let widget: gtk::Widget = term.clone().upcast();
     content_stack.add_named(&widget, Some(&tab_id));
 
