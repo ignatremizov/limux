@@ -2035,14 +2035,7 @@ fn create_browser_widget(
     {
         let wv = webview.clone();
         url_entry.connect_activate(move |entry| {
-            let mut url = entry.text().to_string();
-            if !url.starts_with("http://") && !url.starts_with("https://") {
-                if url.contains('.') {
-                    url = format!("https://{url}");
-                } else {
-                    url = format!("https://www.google.com/search?q={}", url.replace(' ', "+"));
-                }
-            }
+            let url = normalize_browser_entry_input(&entry.text());
             wv.load_uri(&url);
         });
     }
@@ -2143,6 +2136,31 @@ fn create_browser_widget(
     (vbox.upcast(), "Browser".to_string(), browser_handles)
 }
 
+fn normalize_browser_entry_input(input: &str) -> String {
+    if input.starts_with("http://") || input.starts_with("https://") {
+        return input.to_string();
+    }
+
+    if is_localhost_input(input) {
+        format!("http://{input}")
+    } else if input.contains('.') {
+        format!("https://{input}")
+    } else {
+        format!(
+            "https://www.google.com/search?q={}",
+            input.replace(' ', "+")
+        )
+    }
+}
+
+fn is_localhost_input(input: &str) -> bool {
+    input == "localhost"
+        || input
+            .strip_prefix("localhost")
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|ch| matches!(ch, ':' | '/' | '?' | '#'))
+}
+
 #[cfg(not(feature = "webkit"))]
 fn create_browser_widget(
     initial_uri: Option<&str>,
@@ -2180,7 +2198,7 @@ fn create_browser_widget(
 
 #[cfg(test)]
 mod tests {
-    use super::pane_action_tooltip;
+    use super::{is_localhost_input, normalize_browser_entry_input, pane_action_tooltip};
     use crate::shortcut_config::{default_shortcuts, resolve_shortcuts_from_str, ShortcutId};
 
     #[test]
@@ -2220,5 +2238,54 @@ mod tests {
             pane_action_tooltip(&unbound, "Close pane", Some(ShortcutId::CloseFocusedPane)),
             "Close pane"
         );
+    }
+
+    #[test]
+    fn localhost_inputs_only_match_real_localhost_hosts() {
+        for input in [
+            "localhost",
+            "localhost:3000",
+            "localhost/path",
+            "localhost?q=1",
+        ] {
+            assert!(is_localhost_input(input), "{input} should be localhost");
+        }
+
+        for input in [
+            "localhost.run",
+            "localhost.example.com",
+            "localhost docs",
+            "mylocalhost:3000",
+        ] {
+            assert!(
+                !is_localhost_input(input),
+                "{input} should not be treated as localhost"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_browser_entry_input_preserves_search_and_domain_behavior() {
+        let cases = [
+            ("https://example.com", "https://example.com"),
+            ("localhost", "http://localhost"),
+            ("localhost:3000", "http://localhost:3000"),
+            ("localhost/path", "http://localhost/path"),
+            ("localhost.run", "https://localhost.run"),
+            ("localhost.example.com", "https://localhost.example.com"),
+            (
+                "localhost docs",
+                "https://www.google.com/search?q=localhost+docs",
+            ),
+            ("example.com", "https://example.com"),
+            (
+                "example search",
+                "https://www.google.com/search?q=example+search",
+            ),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(normalize_browser_entry_input(input), expected, "{input}");
+        }
     }
 }
