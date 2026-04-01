@@ -80,33 +80,70 @@ impl AppState {
 type State = Rc<RefCell<AppState>>;
 const SPLIT_RATIO_STATE_KEY: &str = "limux-split-ratio-state";
 
-fn request_session_save(state: &State) {
-    let should_schedule = {
-        let mut s = state.borrow_mut();
-        if s.persistence_suspended || s.save_queued {
-            false
-        } else {
-            s.save_queued = true;
-            true
-        }
-    };
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionSaveRequest {
+    Ignore,
+    RetryOnIdle,
+    FlushOnIdle,
+}
 
-    if !should_schedule {
-        return;
+trait SessionSaveAccess {
+    fn persistence_suspended(&self) -> bool;
+    fn save_queued(&self) -> bool;
+    fn set_save_queued(&mut self, queued: bool);
+}
+
+impl SessionSaveAccess for AppState {
+    fn persistence_suspended(&self) -> bool {
+        self.persistence_suspended
     }
 
-    let state = state.clone();
-    glib::idle_add_local_once(move || {
-        let should_save = {
-            let mut s = state.borrow_mut();
-            let should_save = s.save_queued && !s.persistence_suspended;
-            s.save_queued = false;
-            should_save
-        };
-        if should_save {
-            save_session_now(&state);
+    fn save_queued(&self) -> bool {
+        self.save_queued
+    }
+
+    fn set_save_queued(&mut self, queued: bool) {
+        self.save_queued = queued;
+    }
+}
+
+fn queue_session_save_request<T: SessionSaveAccess>(state: &Rc<RefCell<T>>) -> SessionSaveRequest {
+    let Ok(mut s) = state.try_borrow_mut() else {
+        return SessionSaveRequest::RetryOnIdle;
+    };
+
+    if s.persistence_suspended() || s.save_queued() {
+        SessionSaveRequest::Ignore
+    } else {
+        s.set_save_queued(true);
+        SessionSaveRequest::FlushOnIdle
+    }
+}
+
+fn request_session_save(state: &State) {
+    match queue_session_save_request(state) {
+        SessionSaveRequest::Ignore => {}
+        SessionSaveRequest::RetryOnIdle => {
+            let state = state.clone();
+            glib::idle_add_local_once(move || {
+                request_session_save(&state);
+            });
         }
-    });
+        SessionSaveRequest::FlushOnIdle => {
+            let state = state.clone();
+            glib::idle_add_local_once(move || {
+                let should_save = {
+                    let mut s = state.borrow_mut();
+                    let should_save = s.save_queued && !s.persistence_suspended;
+                    s.save_queued = false;
+                    should_save
+                };
+                if should_save {
+                    save_session_now(&state);
+                }
+            });
+        }
+    }
 }
 
 fn save_session_now(state: &State) {
@@ -2027,6 +2064,10 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         let s = state.borrow();
         s.shortcuts.clone()
     };
+    let (stack, sidebar_list) = {
+        let s = state.borrow();
+        (s.stack.clone(), s.sidebar_list.clone())
+    };
     let id = uuid::Uuid::new_v4().to_string();
     let stack_name = format!("ws-{id}");
     let working_dir = workspace
@@ -2034,13 +2075,11 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         .as_deref()
         .or(workspace.cwd.as_deref());
     let root = build_workspace_root(state, &shortcuts, &id, working_dir, Some(&workspace.layout));
-    let mut s = state.borrow_mut();
-
-    s.stack.add_named(&root, Some(&stack_name));
+    stack.add_named(&root, Some(&stack_name));
 
     let (row, name_label, favorite_button, notify_dot, notify_label, path_label) =
         build_sidebar_row(&workspace.name, workspace.folder_path.as_deref());
-    s.sidebar_list.append(&row);
+    sidebar_list.append(&row);
     install_workspace_row_interactions(state, &id, &row, &favorite_button);
 
     let cwd: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(workspace.cwd.clone()));
@@ -2064,14 +2103,13 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         set_workspace_favorite_visual(&ws);
     }
 
-    s.workspaces.push(ws);
-    let new_idx = s.workspaces.len() - 1;
-    s.active_idx = new_idx;
-    s.stack.set_visible_child_name(&stack_name);
+    {
+        let mut s = state.borrow_mut();
+        s.workspaces.push(ws);
+        s.active_idx = s.workspaces.len() - 1;
+    }
 
-    let sidebar_list = s.sidebar_list.clone();
-    drop(s);
-
+    stack.set_visible_child_name(&stack_name);
     sidebar_list.select_row(Some(&row));
 }
 
@@ -2904,22 +2942,74 @@ fn mark_workspace_unread(state: &State, ws_id: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use super::glib;
     use super::gtk::gdk;
     use super::{
-        clamp_workspace_insert_index_for_pinning, favorites_prefix_len,
+        clamp_workspace_insert_index_for_pinning, favorites_prefix_len, queue_session_save_request,
         shortcut_allowed_while_browser_find_active, shortcut_blocked_by_editable,
         shortcut_command_from_key_event, shortcut_dispatch_propagation, sidebar_toggle_tooltip,
-        EditableCaptureContext,
+        EditableCaptureContext, SessionSaveAccess, SessionSaveRequest,
     };
     use crate::shortcut_config::{
         default_shortcuts, resolve_shortcuts_from_str, EditableCapturePolicy, ShortcutCommand,
     };
 
+    #[derive(Default)]
+    struct TestSessionSaveState {
+        persistence_suspended: bool,
+        save_queued: bool,
+    }
+
+    impl SessionSaveAccess for TestSessionSaveState {
+        fn persistence_suspended(&self) -> bool {
+            self.persistence_suspended
+        }
+
+        fn save_queued(&self) -> bool {
+            self.save_queued
+        }
+
+        fn set_save_queued(&mut self, queued: bool) {
+            self.save_queued = queued;
+        }
+    }
+
     #[test]
     fn favorites_prefix_len_counts_only_leading_favorites() {
         let flags = [true, true, false, true, false];
         assert_eq!(favorites_prefix_len(&flags), 2);
+    }
+
+    #[test]
+    fn queue_session_save_request_sets_queued_once() {
+        let state = Rc::new(RefCell::new(TestSessionSaveState::default()));
+
+        assert_eq!(
+            queue_session_save_request(&state),
+            SessionSaveRequest::FlushOnIdle
+        );
+        assert!(state.borrow().save_queued);
+        assert_eq!(
+            queue_session_save_request(&state),
+            SessionSaveRequest::Ignore
+        );
+    }
+
+    #[test]
+    fn queue_session_save_request_retries_when_state_is_already_borrowed() {
+        let state = Rc::new(RefCell::new(TestSessionSaveState::default()));
+        let borrow = state.borrow_mut();
+
+        assert_eq!(
+            queue_session_save_request(&state),
+            SessionSaveRequest::RetryOnIdle
+        );
+
+        drop(borrow);
+        assert!(!state.borrow().save_queued);
     }
 
     #[test]
