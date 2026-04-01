@@ -37,7 +37,10 @@ If the file is missing, Limux uses built-in defaults.
 - If two active shortcuts resolve to the same binding, Limux rejects the override set and falls back to defaults.
 - Unknown shortcut IDs are ignored with a warning.
 - `null` or `""` unbinds a shortcut.
-- Host shortcuts must use `Ctrl` or `Alt` as the base modifier. `Shift` can be added on top of that.
+- Host shortcuts must use `Ctrl`, `Alt`, or `Cmd` as the base modifier unless the shortcut explicitly allows a bare function key, such as the default `F11` fullscreen binding. `Shift` can be added on top of a modified shortcut.
+- Most default shortcuts use `Ctrl`; fullscreen defaults to `F11`.
+- `Cmd` is a logical Limux modifier that matches either Linux `Meta` or Linux `Super` for custom remaps.
+- App-global shortcuts still fire inside editable widgets, but surface and browser shortcuts bypass editable widgets so native text editing keeps working.
 
 ## Keybinds Editor
 
@@ -58,6 +61,7 @@ Capture rules:
   - `Ctrl+H`
   - `Ctrl+Shift+H`
   - `Alt+X`
+  - `Ctrl+L`
 - rejected examples:
   - plain `H`
   - `Shift+H`
@@ -96,7 +100,11 @@ These are the current supported config keys and defaults:
 |---|---|
 | `new_workspace` | `<Ctrl><Shift>n` |
 | `close_workspace` | `<Ctrl><Shift>w` |
-| `toggle_sidebar` | `<Ctrl>b` |
+| `quit_app` | `<Ctrl>q` |
+| `new_instance` | `<Ctrl><Alt>n` |
+| `toggle_sidebar` | `<Ctrl>m` |
+| `toggle_top_bar` | `<Ctrl><Shift>m` |
+| `toggle_fullscreen` | `F11` |
 | `next_workspace` | `<Ctrl>Page_Down` |
 | `prev_workspace` | `<Ctrl>Page_Up` |
 | `cycle_tab_prev` | `<Ctrl><Shift>Left` |
@@ -119,6 +127,24 @@ These are the current supported config keys and defaults:
 | `activate_workspace_7` | `<Ctrl>7` |
 | `activate_workspace_8` | `<Ctrl>8` |
 | `activate_last_workspace` | `<Ctrl>9` |
+| `open_browser_in_split` | `<Ctrl><Shift>l` |
+| `browser_focus_location` | `<Ctrl>l` |
+| `browser_back` | `<Ctrl>bracketleft` |
+| `browser_forward` | `<Ctrl>bracketright` |
+| `browser_reload` | `<Ctrl>r` |
+| `browser_inspector` | `<Ctrl><Alt>i` |
+| `browser_console` | `<Ctrl><Alt>c` |
+| `surface_find` | `<Ctrl>f` |
+| `surface_find_next` | `<Ctrl>g` |
+| `surface_find_previous` | `<Ctrl><Shift>g` |
+| `surface_find_hide` | `<Ctrl><Shift>f` |
+| `surface_use_selection_for_find` | `<Ctrl>e` |
+| `terminal_clear_scrollback` | `<Ctrl>k` |
+| `terminal_copy` | `<Ctrl>c` |
+| `terminal_paste` | `<Ctrl>v` |
+| `terminal_increase_font_size` | `<Ctrl>plus` |
+| `terminal_decrease_font_size` | `<Ctrl>minus` |
+| `terminal_reset_font_size` | `<Ctrl><Shift>0` |
 
 ## Dispatch Model
 
@@ -128,11 +154,19 @@ There are two host shortcut paths, both driven by the same resolved registry:
    - Used for:
      - `new_workspace`
      - `close_workspace`
+     - `quit_app`
+     - `new_instance`
      - `toggle_sidebar`
+     - `toggle_top_bar`
+     - `toggle_fullscreen`
      - `next_workspace`
      - `prev_workspace`
 2. Capture-phase key dispatch
    - Used for everything in the table above, including the GTK-backed actions
+   - Surface commands resolve the focused pane target first:
+     - terminal target for Ghostty binding actions
+     - browser target for WebKit navigation, find, and inspector actions
+     - `None` when focus is outside a usable pane
 
 That means a remap changes both the GTK accelerator registration and the capture-phase match.
 
@@ -147,6 +181,14 @@ That means terminal-native combos like these should pass through unless you expl
 - `Ctrl+R`
 - plain typing
 - `Enter`
+
+Editable browser fields should also retain native behavior for:
+
+- `Ctrl+C`
+- `Ctrl+V`
+- `Ctrl+F`
+- `Ctrl+L`
+- `Ctrl+R`
 
 This is the behavior you want when testing that unbound shortcuts stop being stolen by the host.
 
@@ -166,6 +208,7 @@ These surfaces do not currently show a shortcut suffix:
 
 - new browser tab button
 - browser navigation buttons (`Back`, `Forward`, `Reload`)
+- browser find bar controls
 
 Note:
 
@@ -179,6 +222,7 @@ From the repo root:
 ```bash
 cargo test -p limux-host-linux
 cargo build -p limux-host-linux --features webkit
+cargo build -p limux-host-linux --no-default-features
 ```
 
 Run the app for manual testing:
@@ -200,14 +244,20 @@ trash ~/.config/limux/config.json
 
 Launch Limux and verify:
 
-- `Ctrl+B` toggles the sidebar
+- `Ctrl+M` toggles the sidebar
+- `Ctrl+Shift+M` toggles the top bar
+- `F11` toggles fullscreen
 - `Ctrl+T` opens a terminal tab
 - `Ctrl+D` splits right
 - `Ctrl+Shift+D` splits down
 - `Ctrl+W` closes the focused pane
 - `Ctrl+Page_Down` and `Ctrl+Page_Up` switch workspaces
-- sidebar tooltips show `Ctrl+B`
+- sidebar tooltips show `Ctrl+M`
 - pane button tooltips show the default shortcut suffixes where applicable
+- `Ctrl+Q` quits Limux
+- `Ctrl+Alt+N` opens a second Limux instance
+- `Ctrl+K` clears terminal scrollback
+- `Ctrl+Shift+0` resets terminal font size
 
 ### 2. Remap One Shortcut
 
@@ -224,7 +274,7 @@ Create:
 Restart Limux and verify:
 
 - `Ctrl+Alt+B` toggles the sidebar
-- `Ctrl+B` no longer toggles the sidebar
+- `Ctrl+M` no longer toggles the sidebar
 - sidebar tooltips show `Ctrl+Alt+B`
 
 ### 3. Unbind One Shortcut
@@ -283,7 +333,7 @@ Restart Limux from a terminal and verify:
 
 - Limux prints a warning about duplicate bindings
 - Limux falls back to defaults
-- `Ctrl+B` toggles the sidebar
+- `Ctrl+M` toggles the sidebar
 - `Ctrl+D` still splits right
 
 ### 6. Open The Keybinds Editor
@@ -354,6 +404,61 @@ Restart Limux from a terminal and verify:
 - Limux prints a warning
 - Limux falls back to defaults
 - default shortcuts work again
+
+### 11. Cmd Alias Policy
+
+Create:
+
+```json
+{
+  "shortcuts": {
+    "browser_focus_location": "<Super>l"
+  }
+}
+```
+
+Restart Limux and verify:
+
+- the keybind editor displays `Cmd+L`
+- either the physical `Meta+L` or `Super+L` combination focuses the browser address bar
+
+### 12. Editable Widget Bypass
+
+Launch a browser tab and verify:
+
+- `Ctrl+L` focuses the address bar when the page has focus
+- `Ctrl+L` is not stolen once the address bar already has focus
+- `Ctrl+R` reloads only when the page has focus
+- `Ctrl+C` and `Ctrl+V` keep native copy and paste inside the address bar and browser find field
+- sidebar rename entries keep native text-editing behavior for `Ctrl+C` and `Ctrl+V`
+
+### 13. Focused Surface Dispatch
+
+Verify with a terminal tab focused:
+
+- `Ctrl+F` opens terminal search
+- `Ctrl+G` and `Ctrl+Shift+G` move through terminal search results
+- `Ctrl+E` uses the current terminal selection for search
+- `Ctrl+K`, `Ctrl+C`, `Ctrl+V`, `Ctrl++`, `Ctrl+-`, and `Ctrl+Shift+0` affect only the terminal
+
+Verify with a browser tab focused:
+
+- `Ctrl+F` opens the browser find bar
+- `Ctrl+G` and `Ctrl+Shift+G` move through browser find results
+- `Ctrl+Shift+F` hides the browser find bar and returns focus to the page
+- `Ctrl+E` seeds browser find from the current DOM selection when page text is selected
+- terminal shortcuts like `Ctrl+K` do not fire on the browser
+
+### 14. Browser Navigation And Devtools
+
+Verify with a browser tab focused:
+
+- `Ctrl+[` navigates back
+- `Ctrl+]` navigates forward
+- `Ctrl+R` reloads
+- `Ctrl+Alt+I` opens Web Inspector
+- `Ctrl+Alt+C` also opens Web Inspector because WebKitGTK does not expose a console-only shortcut target
+- `Ctrl+Shift+L` opens a new split with a browser tab
 
 ## Good Test Cases
 

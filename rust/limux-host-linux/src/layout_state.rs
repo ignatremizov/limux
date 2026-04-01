@@ -38,6 +38,8 @@ pub struct AppSessionState {
     pub version: u32,
     #[serde(default)]
     pub active_workspace_index: usize,
+    #[serde(default = "default_top_bar_visible")]
+    pub top_bar_visible: bool,
     #[serde(default)]
     pub sidebar: SidebarState,
     #[serde(default)]
@@ -136,6 +138,7 @@ impl Default for AppSessionState {
         Self {
             version: default_session_version(),
             active_workspace_index: 0,
+            top_bar_visible: default_top_bar_visible(),
             sidebar: SidebarState::default(),
             workspaces: Vec::new(),
         }
@@ -145,6 +148,14 @@ impl Default for AppSessionState {
 impl PaneState {
     pub fn fallback(working_directory: Option<&str>) -> Self {
         let tab = TabState::terminal(default_tab_id("terminal"), working_directory);
+        Self {
+            active_tab_id: Some(tab.id.clone()),
+            tabs: vec![tab],
+        }
+    }
+
+    pub fn browser_only(uri: Option<&str>) -> Self {
+        let tab = TabState::browser(default_tab_id("browser"), uri);
         Self {
             active_tab_id: Some(tab.id.clone()),
             tabs: vec![tab],
@@ -160,6 +171,17 @@ impl TabState {
             pinned: false,
             content: TabContentState::Terminal {
                 cwd: cwd.map(|value| value.to_string()),
+            },
+        }
+    }
+
+    pub fn browser(id: impl Into<String>, uri: Option<&str>) -> Self {
+        Self {
+            id: id.into(),
+            custom_name: None,
+            pinned: false,
+            content: TabContentState::Browser {
+                uri: uri.map(|value| value.to_string()),
             },
         }
     }
@@ -360,6 +382,10 @@ fn default_sidebar_visible() -> bool {
     true
 }
 
+fn default_top_bar_visible() -> bool {
+    true
+}
+
 fn default_sidebar_width() -> i32 {
     DEFAULT_SIDEBAR_WIDTH
 }
@@ -459,6 +485,28 @@ mod tests {
     }
 
     #[test]
+    fn load_defaults_top_bar_visible_when_omitted_from_session_json() {
+        let dir = tempdir().expect("tempdir");
+        let canonical_path = canonical_session_path_in(dir.path());
+        fs::write(
+            &canonical_path,
+            r#"{
+                "version": 1,
+                "active_workspace_index": 0,
+                "sidebar": {
+                    "visible": true,
+                    "width": 220
+                },
+                "workspaces": []
+            }"#,
+        )
+        .expect("write canonical");
+
+        let loaded = load_session_from_dir(dir.path());
+        assert!(loaded.state.top_bar_visible);
+    }
+
+    #[test]
     fn save_session_atomic_writes_canonical_file() {
         let dir = tempdir().expect("tempdir");
         let state = AppSessionState {
@@ -525,8 +573,23 @@ mod tests {
     }
 
     #[test]
+    fn browser_only_pane_creates_a_single_browser_tab() {
+        let pane = PaneState::browser_only(Some("https://example.com"));
+
+        assert_eq!(pane.tabs.len(), 1);
+        assert_eq!(pane.active_tab_id.as_deref(), Some("browser-0"));
+        match &pane.tabs[0].content {
+            TabContentState::Browser { uri } => {
+                assert_eq!(uri.as_deref(), Some("https://example.com"));
+            }
+            other => panic!("expected browser tab, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn keybind_tab_round_trips_through_session_json() {
         let state = AppSessionState {
+            top_bar_visible: false,
             workspaces: vec![WorkspaceState {
                 name: "workspace".to_string(),
                 favorite: false,
@@ -548,6 +611,7 @@ mod tests {
         let raw = serde_json::to_string(&state).expect("serialize session");
         let decoded: AppSessionState = serde_json::from_str(&raw).expect("deserialize session");
 
+        assert!(!decoded.top_bar_visible);
         let LayoutNodeState::Pane(pane) = &decoded.workspaces[0].layout else {
             panic!("expected pane");
         };

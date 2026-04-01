@@ -15,7 +15,11 @@ pub const SHORTCUTS_FILE_NAME: &str = "shortcuts.json";
 pub enum ShortcutId {
     NewWorkspace,
     CloseWorkspace,
+    QuitApp,
+    NewInstance,
     ToggleSidebar,
+    ToggleTopBar,
+    ToggleFullscreen,
     NextWorkspace,
     PrevWorkspace,
     CycleTabPrev,
@@ -38,13 +42,35 @@ pub enum ShortcutId {
     ActivateWorkspace7,
     ActivateWorkspace8,
     ActivateLastWorkspace,
+    OpenBrowserInSplit,
+    BrowserFocusLocation,
+    BrowserBack,
+    BrowserForward,
+    BrowserReload,
+    BrowserInspector,
+    BrowserConsole,
+    SurfaceFind,
+    SurfaceFindNext,
+    SurfaceFindPrevious,
+    SurfaceFindHide,
+    SurfaceUseSelectionForFind,
+    TerminalClearScrollback,
+    TerminalCopy,
+    TerminalPaste,
+    TerminalIncreaseFontSize,
+    TerminalDecreaseFontSize,
+    TerminalResetFontSize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ShortcutCommand {
     NewWorkspace,
     CloseWorkspace,
+    QuitApp,
+    NewInstance,
     ToggleSidebar,
+    ToggleTopBar,
+    ToggleFullscreen,
     NextWorkspace,
     PrevWorkspace,
     CycleTabPrev,
@@ -66,6 +92,39 @@ pub enum ShortcutCommand {
     ActivateWorkspace7,
     ActivateWorkspace8,
     ActivateLastWorkspace,
+    OpenBrowserInSplit,
+    BrowserFocusLocation,
+    BrowserBack,
+    BrowserForward,
+    BrowserReload,
+    BrowserInspector,
+    BrowserConsole,
+    SurfaceFind,
+    SurfaceFindNext,
+    SurfaceFindPrevious,
+    SurfaceFindHide,
+    SurfaceUseSelectionForFind,
+    TerminalClearScrollback,
+    TerminalCopy,
+    TerminalPaste,
+    TerminalIncreaseFontSize,
+    TerminalDecreaseFontSize,
+    TerminalResetFontSize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ShortcutScope {
+    AppGlobal,
+    Window,
+    FocusedTerminal,
+    FocusedBrowser,
+    FocusedSurface,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EditableCapturePolicy {
+    AlwaysCapture,
+    BypassInEditable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +136,8 @@ pub struct ShortcutDefinition {
     pub label: &'static str,
     pub registers_gtk_accel: bool,
     pub command: ShortcutCommand,
+    pub scope: ShortcutScope,
+    pub editable_capture_policy: EditableCapturePolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -85,8 +146,7 @@ pub struct NormalizedShortcut {
     ctrl: bool,
     shift: bool,
     alt: bool,
-    meta: bool,
-    super_key: bool,
+    cmd: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,10 +227,10 @@ impl std::fmt::Display for ShortcutConfigError {
                 )
             }
             Self::BaseModifierRequired { .. } => {
-                write!(f, "use Ctrl or Alt with another key")
+                write!(f, "use Ctrl, Alt, or Cmd with another key")
             }
             Self::ModifierOnlyBinding { .. } => {
-                write!(f, "choose a non-modifier key with Ctrl or Alt")
+                write!(f, "choose a non-modifier key with Ctrl, Alt, or Cmd")
             }
             Self::InvalidJson(reason) => write!(f, "invalid shortcut config JSON: {reason}"),
         }
@@ -248,7 +308,7 @@ struct ShortcutConfigFile {
     shortcuts: HashMap<String, serde_json::Value>,
 }
 
-const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
+const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 47] = [
     ShortcutDefinition {
         id: ShortcutId::NewWorkspace,
         config_key: "new_workspace",
@@ -257,6 +317,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "New Workspace",
         registers_gtk_accel: true,
         command: ShortcutCommand::NewWorkspace,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::CloseWorkspace,
@@ -266,15 +328,63 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Close Workspace",
         registers_gtk_accel: true,
         command: ShortcutCommand::CloseWorkspace,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::QuitApp,
+        config_key: "quit_app",
+        action_name: "app.quit",
+        default_accel: "<Ctrl>q",
+        label: "Quit Limux",
+        registers_gtk_accel: true,
+        command: ShortcutCommand::QuitApp,
+        scope: ShortcutScope::AppGlobal,
+        editable_capture_policy: EditableCapturePolicy::AlwaysCapture,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::NewInstance,
+        config_key: "new_instance",
+        action_name: "app.new-instance",
+        default_accel: "<Ctrl><Alt>n",
+        label: "New Limux Instance",
+        registers_gtk_accel: true,
+        command: ShortcutCommand::NewInstance,
+        scope: ShortcutScope::AppGlobal,
+        editable_capture_policy: EditableCapturePolicy::AlwaysCapture,
     },
     ShortcutDefinition {
         id: ShortcutId::ToggleSidebar,
         config_key: "toggle_sidebar",
         action_name: "win.toggle-sidebar",
-        default_accel: "<Ctrl>b",
+        default_accel: "<Ctrl>m",
         label: "Toggle Sidebar",
         registers_gtk_accel: true,
         command: ShortcutCommand::ToggleSidebar,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::ToggleTopBar,
+        config_key: "toggle_top_bar",
+        action_name: "win.toggle-top-bar",
+        default_accel: "<Ctrl><Shift>m",
+        label: "Toggle Top Bar",
+        registers_gtk_accel: true,
+        command: ShortcutCommand::ToggleTopBar,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::ToggleFullscreen,
+        config_key: "toggle_fullscreen",
+        action_name: "win.toggle-fullscreen",
+        default_accel: "F11",
+        label: "Toggle Fullscreen",
+        registers_gtk_accel: true,
+        command: ShortcutCommand::ToggleFullscreen,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::AlwaysCapture,
     },
     ShortcutDefinition {
         id: ShortcutId::NextWorkspace,
@@ -284,6 +394,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Next Workspace",
         registers_gtk_accel: true,
         command: ShortcutCommand::NextWorkspace,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::PrevWorkspace,
@@ -293,6 +405,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Previous Workspace",
         registers_gtk_accel: true,
         command: ShortcutCommand::PrevWorkspace,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::CycleTabPrev,
@@ -302,6 +416,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Previous Tab",
         registers_gtk_accel: false,
         command: ShortcutCommand::CycleTabPrev,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::CycleTabNext,
@@ -311,6 +427,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Next Tab",
         registers_gtk_accel: false,
         command: ShortcutCommand::CycleTabNext,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::SplitDown,
@@ -320,6 +438,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Split Down",
         registers_gtk_accel: false,
         command: ShortcutCommand::SplitDown,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::NewTerminalInFocusedPane,
@@ -329,6 +449,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "New Terminal In Focused Pane",
         registers_gtk_accel: false,
         command: ShortcutCommand::NewTerminal,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::SplitRight,
@@ -338,6 +460,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Split Right",
         registers_gtk_accel: false,
         command: ShortcutCommand::SplitRight,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::CloseFocusedPane,
@@ -347,6 +471,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Close Focused Pane",
         registers_gtk_accel: false,
         command: ShortcutCommand::CloseFocusedPane,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::NewTerminal,
@@ -356,6 +482,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "New Terminal",
         registers_gtk_accel: false,
         command: ShortcutCommand::NewTerminal,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::FocusLeft,
@@ -365,6 +493,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Focus Left",
         registers_gtk_accel: false,
         command: ShortcutCommand::FocusLeft,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::FocusRight,
@@ -374,6 +504,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Focus Right",
         registers_gtk_accel: false,
         command: ShortcutCommand::FocusRight,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::FocusUp,
@@ -383,6 +515,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Focus Up",
         registers_gtk_accel: false,
         command: ShortcutCommand::FocusUp,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::FocusDown,
@@ -392,6 +526,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Focus Down",
         registers_gtk_accel: false,
         command: ShortcutCommand::FocusDown,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::ActivateWorkspace1,
@@ -401,6 +537,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Activate Workspace 1",
         registers_gtk_accel: false,
         command: ShortcutCommand::ActivateWorkspace1,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::ActivateWorkspace2,
@@ -410,6 +548,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Activate Workspace 2",
         registers_gtk_accel: false,
         command: ShortcutCommand::ActivateWorkspace2,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::ActivateWorkspace3,
@@ -419,6 +559,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Activate Workspace 3",
         registers_gtk_accel: false,
         command: ShortcutCommand::ActivateWorkspace3,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::ActivateWorkspace4,
@@ -428,6 +570,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Activate Workspace 4",
         registers_gtk_accel: false,
         command: ShortcutCommand::ActivateWorkspace4,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::ActivateWorkspace5,
@@ -437,6 +581,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Activate Workspace 5",
         registers_gtk_accel: false,
         command: ShortcutCommand::ActivateWorkspace5,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::ActivateWorkspace6,
@@ -446,6 +592,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Activate Workspace 6",
         registers_gtk_accel: false,
         command: ShortcutCommand::ActivateWorkspace6,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::ActivateWorkspace7,
@@ -455,6 +603,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Activate Workspace 7",
         registers_gtk_accel: false,
         command: ShortcutCommand::ActivateWorkspace7,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::ActivateWorkspace8,
@@ -464,6 +614,8 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Activate Workspace 8",
         registers_gtk_accel: false,
         command: ShortcutCommand::ActivateWorkspace8,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
         id: ShortcutId::ActivateLastWorkspace,
@@ -473,6 +625,206 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
         label: "Activate Last Workspace",
         registers_gtk_accel: false,
         command: ShortcutCommand::ActivateLastWorkspace,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::OpenBrowserInSplit,
+        config_key: "open_browser_in_split",
+        action_name: "win.open-browser-in-split",
+        default_accel: "<Ctrl><Shift>l",
+        label: "Open Browser In Split",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::OpenBrowserInSplit,
+        scope: ShortcutScope::FocusedBrowser,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::BrowserFocusLocation,
+        config_key: "browser_focus_location",
+        action_name: "win.browser-focus-location",
+        default_accel: "<Ctrl>l",
+        label: "Browser Focus Location",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::BrowserFocusLocation,
+        scope: ShortcutScope::FocusedBrowser,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::BrowserBack,
+        config_key: "browser_back",
+        action_name: "win.browser-back",
+        default_accel: "<Ctrl>bracketleft",
+        label: "Browser Back",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::BrowserBack,
+        scope: ShortcutScope::FocusedBrowser,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::BrowserForward,
+        config_key: "browser_forward",
+        action_name: "win.browser-forward",
+        default_accel: "<Ctrl>bracketright",
+        label: "Browser Forward",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::BrowserForward,
+        scope: ShortcutScope::FocusedBrowser,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::BrowserReload,
+        config_key: "browser_reload",
+        action_name: "win.browser-reload",
+        default_accel: "<Ctrl>r",
+        label: "Browser Reload",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::BrowserReload,
+        scope: ShortcutScope::FocusedBrowser,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::BrowserInspector,
+        config_key: "browser_inspector",
+        action_name: "win.browser-inspector",
+        default_accel: "<Ctrl><Alt>i",
+        label: "Browser Inspector",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::BrowserInspector,
+        scope: ShortcutScope::FocusedBrowser,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::BrowserConsole,
+        config_key: "browser_console",
+        action_name: "win.browser-console",
+        default_accel: "<Ctrl><Alt>c",
+        label: "Browser JavaScript Console",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::BrowserConsole,
+        scope: ShortcutScope::FocusedBrowser,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::SurfaceFind,
+        config_key: "surface_find",
+        action_name: "win.surface-find",
+        default_accel: "<Ctrl>f",
+        label: "Find",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::SurfaceFind,
+        scope: ShortcutScope::FocusedSurface,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::SurfaceFindNext,
+        config_key: "surface_find_next",
+        action_name: "win.surface-find-next",
+        default_accel: "<Ctrl>g",
+        label: "Find Next",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::SurfaceFindNext,
+        scope: ShortcutScope::FocusedSurface,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::SurfaceFindPrevious,
+        config_key: "surface_find_previous",
+        action_name: "win.surface-find-previous",
+        default_accel: "<Ctrl><Shift>g",
+        label: "Find Previous",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::SurfaceFindPrevious,
+        scope: ShortcutScope::FocusedSurface,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::SurfaceFindHide,
+        config_key: "surface_find_hide",
+        action_name: "win.surface-find-hide",
+        default_accel: "<Ctrl><Shift>f",
+        label: "Hide Find",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::SurfaceFindHide,
+        scope: ShortcutScope::FocusedSurface,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::SurfaceUseSelectionForFind,
+        config_key: "surface_use_selection_for_find",
+        action_name: "win.surface-use-selection-for-find",
+        default_accel: "<Ctrl>e",
+        label: "Use Selection For Find",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::SurfaceUseSelectionForFind,
+        scope: ShortcutScope::FocusedSurface,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::TerminalClearScrollback,
+        config_key: "terminal_clear_scrollback",
+        action_name: "win.terminal-clear-scrollback",
+        default_accel: "<Ctrl>k",
+        label: "Terminal Clear Scrollback",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::TerminalClearScrollback,
+        scope: ShortcutScope::FocusedTerminal,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::TerminalCopy,
+        config_key: "terminal_copy",
+        action_name: "win.terminal-copy",
+        default_accel: "<Ctrl><Shift>c",
+        label: "Terminal Copy",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::TerminalCopy,
+        scope: ShortcutScope::FocusedTerminal,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::TerminalPaste,
+        config_key: "terminal_paste",
+        action_name: "win.terminal-paste",
+        default_accel: "<Ctrl>v",
+        label: "Terminal Paste",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::TerminalPaste,
+        scope: ShortcutScope::FocusedTerminal,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::TerminalIncreaseFontSize,
+        config_key: "terminal_increase_font_size",
+        action_name: "win.terminal-increase-font-size",
+        default_accel: "<Ctrl>plus",
+        label: "Terminal Increase Font Size",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::TerminalIncreaseFontSize,
+        scope: ShortcutScope::FocusedTerminal,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::TerminalDecreaseFontSize,
+        config_key: "terminal_decrease_font_size",
+        action_name: "win.terminal-decrease-font-size",
+        default_accel: "<Ctrl>minus",
+        label: "Terminal Decrease Font Size",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::TerminalDecreaseFontSize,
+        scope: ShortcutScope::FocusedTerminal,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::TerminalResetFontSize,
+        config_key: "terminal_reset_font_size",
+        action_name: "win.terminal-reset-font-size",
+        default_accel: "<Ctrl><Shift>0",
+        label: "Terminal Reset Font Size",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::TerminalResetFontSize,
+        scope: ShortcutScope::FocusedTerminal,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
 ];
 
@@ -498,8 +850,7 @@ impl NormalizedShortcut {
             ctrl: modifier.contains(gdk::ModifierType::CONTROL_MASK),
             shift: modifier.contains(gdk::ModifierType::SHIFT_MASK),
             alt: modifier.contains(gdk::ModifierType::ALT_MASK),
-            meta: modifier.contains(gdk::ModifierType::META_MASK),
-            super_key: modifier.contains(gdk::ModifierType::SUPER_MASK),
+            cmd: modifier.intersects(gdk::ModifierType::META_MASK | gdk::ModifierType::SUPER_MASK),
         })
     }
 
@@ -515,8 +866,7 @@ impl NormalizedShortcut {
         let mut ctrl = false;
         let mut shift = false;
         let mut alt = false;
-        let mut meta = false;
-        let mut super_key = false;
+        let mut cmd = false;
 
         while let Some(stripped) = rest.strip_prefix('<') {
             let Some(end) = stripped.find('>') else {
@@ -529,8 +879,7 @@ impl NormalizedShortcut {
                 "ctrl" | "control" => ctrl = true,
                 "shift" => shift = true,
                 "alt" | "option" => alt = true,
-                "meta" | "cmd" | "command" => meta = true,
-                "super" => super_key = true,
+                "meta" | "super" | "cmd" | "command" => cmd = true,
                 _ => {
                     return Err(ShortcutConfigError::UnknownModifier {
                         input: input.to_string(),
@@ -558,28 +907,30 @@ impl NormalizedShortcut {
             ctrl,
             shift,
             alt,
-            meta,
-            super_key,
+            cmd,
         })
     }
 
-    pub fn validate_host_binding(&self, shortcut_id: &str) -> Result<(), ShortcutConfigError> {
+    pub fn validate_host_binding(
+        &self,
+        definition: &ShortcutDefinition,
+    ) -> Result<(), ShortcutConfigError> {
         if is_modifier_only_key(&self.key) {
             return Err(ShortcutConfigError::ModifierOnlyBinding {
-                shortcut_id: shortcut_id.to_string(),
-                input: self.to_gtk_accel(),
+                shortcut_id: definition.config_key.to_string(),
+                input: self.to_config_accel(),
             });
         }
-        if !self.ctrl && !self.alt {
+        if definition.requires_base_modifier() && !self.ctrl && !self.alt && !self.cmd {
             return Err(ShortcutConfigError::BaseModifierRequired {
-                shortcut_id: shortcut_id.to_string(),
-                input: self.to_gtk_accel(),
+                shortcut_id: definition.config_key.to_string(),
+                input: self.to_config_accel(),
             });
         }
         Ok(())
     }
 
-    pub fn to_gtk_accel(&self) -> String {
+    pub fn to_config_accel(&self) -> String {
         let mut accel = String::new();
         if self.ctrl {
             accel.push_str("<Ctrl>");
@@ -587,17 +938,42 @@ impl NormalizedShortcut {
         if self.alt {
             accel.push_str("<Alt>");
         }
-        if self.meta {
-            accel.push_str("<Meta>");
-        }
         if self.shift {
             accel.push_str("<Shift>");
         }
-        if self.super_key {
-            accel.push_str("<Super>");
+        if self.cmd {
+            accel.push_str("<Cmd>");
         }
         accel.push_str(&runtime_key_to_gtk_key(&self.key));
         accel
+    }
+
+    pub fn gtk_accel_variants(&self) -> Vec<String> {
+        let mut variants = Vec::new();
+        for command_prefix in self.command_prefixes() {
+            let mut accel = String::new();
+            if self.ctrl {
+                accel.push_str("<Ctrl>");
+            }
+            if self.alt {
+                accel.push_str("<Alt>");
+            }
+            accel.push_str(command_prefix);
+            if self.shift {
+                accel.push_str("<Shift>");
+            }
+            accel.push_str(&runtime_key_to_gtk_key(&self.key));
+            variants.push(accel);
+        }
+        variants
+    }
+
+    fn command_prefixes(&self) -> &'static [&'static str] {
+        if self.cmd {
+            &["<Meta>", "<Super>"]
+        } else {
+            &[""]
+        }
     }
 
     pub fn to_runtime_combo(&self) -> String {
@@ -608,14 +984,11 @@ impl NormalizedShortcut {
         if self.alt {
             parts.push("alt");
         }
-        if self.meta {
-            parts.push("meta");
-        }
         if self.shift {
             parts.push("shift");
         }
-        if self.super_key {
-            parts.push("super");
+        if self.cmd {
+            parts.push("cmd");
         }
         parts.push(self.key.as_str());
         parts.join("+")
@@ -629,14 +1002,11 @@ impl NormalizedShortcut {
         if self.alt {
             parts.push("Alt".to_string());
         }
-        if self.meta {
-            parts.push("Meta".to_string());
-        }
         if self.shift {
             parts.push("Shift".to_string());
         }
-        if self.super_key {
-            parts.push("Super".to_string());
+        if self.cmd {
+            parts.push("Cmd".to_string());
         }
         parts.push(display_key_label(&self.key));
         parts.join("+")
@@ -644,8 +1014,18 @@ impl NormalizedShortcut {
 }
 
 impl ResolvedShortcut {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn gtk_accel(&self) -> Option<String> {
-        self.binding.as_ref().map(NormalizedShortcut::to_gtk_accel)
+        self.binding
+            .as_ref()
+            .map(NormalizedShortcut::to_config_accel)
+    }
+
+    pub fn gtk_accel_variants(&self) -> Vec<String> {
+        self.binding
+            .as_ref()
+            .map(NormalizedShortcut::gtk_accel_variants)
+            .unwrap_or_default()
     }
 
     pub fn runtime_combo(&self) -> Option<String> {
@@ -671,15 +1051,20 @@ impl ResolvedShortcutConfig {
             .iter()
             .filter(|shortcut| shortcut.definition.registers_gtk_accel)
             .map(|shortcut| {
-                let accels = shortcut.gtk_accel().into_iter().collect();
+                let accels = shortcut.gtk_accel_variants();
                 (shortcut.definition.action_name, accels)
             })
             .collect()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn command_for_runtime_combo(&self, combo: &str) -> Option<ShortcutCommand> {
         self.find_by_runtime_combo(combo)
             .map(|shortcut| shortcut.definition.command)
+    }
+
+    pub fn shortcut_for_runtime_combo(&self, combo: &str) -> Option<&ResolvedShortcut> {
+        self.find_by_runtime_combo(combo)
     }
 
     pub fn display_label_for_id(&self, id: ShortcutId) -> Option<String> {
@@ -719,7 +1104,7 @@ impl ResolvedShortcutConfig {
                     Some(binding) if binding == &default_binding => None,
                     Some(binding) => Some((
                         shortcut.definition.config_key.to_string(),
-                        Value::String(binding.to_gtk_accel()),
+                        Value::String(binding.to_config_accel()),
                     )),
                     None => Some((shortcut.definition.config_key.to_string(), Value::Null)),
                 }
@@ -750,12 +1135,23 @@ pub fn definitions() -> &'static [ShortcutDefinition] {
 }
 
 impl ShortcutDefinition {
+    pub fn requires_base_modifier(&self) -> bool {
+        !matches!(self.id, ShortcutId::ToggleFullscreen)
+    }
+
     pub fn default_binding(&self) -> NormalizedShortcut {
         NormalizedShortcut::parse(self.default_accel).expect("default shortcuts should be valid")
     }
 
     pub fn default_display_label(&self) -> String {
         self.default_binding().to_display_label()
+    }
+
+    pub fn action_basename(&self) -> &'static str {
+        self.action_name
+            .split_once('.')
+            .map(|(_, name)| name)
+            .unwrap_or(self.action_name)
     }
 }
 
@@ -921,12 +1317,12 @@ fn ensure_valid_active_bindings(shortcuts: &[ResolvedShortcut]) -> Result<(), Sh
         let Some(binding) = shortcut.binding.clone() else {
             continue;
         };
-        binding.validate_host_binding(shortcut.definition.config_key)?;
+        binding.validate_host_binding(shortcut.definition)?;
         if let Some(existing) = active.insert(binding.clone(), shortcut.definition.id) {
             return Err(ShortcutConfigError::DuplicateBinding {
                 first: existing,
                 second: shortcut.definition.id,
-                accel: binding.to_gtk_accel(),
+                accel: binding.to_config_accel(),
             });
         }
     }
@@ -1008,7 +1404,7 @@ fn temp_config_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{file_name}.tmp-{}-{nanos}", std::process::id()))
 }
 
-fn definition_by_config_key(config_key: &str) -> Option<&'static ShortcutDefinition> {
+pub(crate) fn definition_by_config_key(config_key: &str) -> Option<&'static ShortcutDefinition> {
     definitions()
         .iter()
         .find(|definition| definition.config_key == config_key)
@@ -1142,6 +1538,7 @@ fn runtime_key_to_gtk_key(key: &str) -> String {
         "enter" => "Return".to_string(),
         "escape" => "Escape".to_string(),
         "tab" => "Tab".to_string(),
+        other if is_function_key(other) => other.to_ascii_uppercase(),
         other => other.to_string(),
     }
 }
@@ -1177,6 +1574,19 @@ fn display_key_label(key: &str) -> String {
     }
 }
 
+fn is_function_key(key: &str) -> bool {
+    key.strip_prefix('f')
+        .map(|suffix| {
+            !suffix.is_empty()
+                && suffix.chars().all(|ch| ch.is_ascii_digit())
+                && suffix
+                    .parse::<u8>()
+                    .map(|value| value >= 1)
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1184,7 +1594,7 @@ mod tests {
 
     #[test]
     fn definitions_cover_current_host_shortcuts() {
-        assert_eq!(definitions().len(), 25);
+        assert_eq!(definitions().len(), 47);
     }
 
     #[test]
@@ -1216,7 +1626,11 @@ mod tests {
             vec![
                 "win.new-workspace",
                 "win.close-workspace",
+                "app.quit",
+                "app.new-instance",
                 "win.toggle-sidebar",
+                "win.toggle-top-bar",
+                "win.toggle-fullscreen",
                 "win.next-workspace",
                 "win.prev-workspace",
             ]
@@ -1226,8 +1640,20 @@ mod tests {
     #[test]
     fn normalized_shortcut_round_trips_between_gtk_and_runtime_forms() {
         let shortcut = NormalizedShortcut::parse("<Shift><Ctrl>Page_Down").unwrap();
-        assert_eq!(shortcut.to_gtk_accel(), "<Ctrl><Shift>Page_Down");
+        assert_eq!(shortcut.to_config_accel(), "<Ctrl><Shift>Page_Down");
         assert_eq!(shortcut.to_runtime_combo(), "ctrl+shift+page_down");
+    }
+
+    #[test]
+    fn normalized_shortcut_round_trips_cmd_modifier_forms() {
+        let shortcut = NormalizedShortcut::parse("<Super><Shift>t").unwrap();
+        assert_eq!(shortcut.to_config_accel(), "<Shift><Cmd>t");
+        assert_eq!(
+            shortcut.gtk_accel_variants(),
+            vec!["<Meta><Shift>t".to_string(), "<Super><Shift>t".to_string()]
+        );
+        assert_eq!(shortcut.to_runtime_combo(), "shift+cmd+t");
+        assert_eq!(shortcut.to_display_label(), "Shift+Cmd+T");
     }
 
     #[test]
@@ -1371,7 +1797,7 @@ mod tests {
         .unwrap();
 
         let gtk_accels = resolved.gtk_accel_entries();
-        assert_eq!(gtk_accels.len(), 5);
+        assert_eq!(gtk_accels.len(), 9);
         assert_eq!(
             gtk_accels
                 .iter()
@@ -1382,12 +1808,48 @@ mod tests {
     }
 
     #[test]
+    fn gtk_accel_entries_keep_ctrl_defaults_single_and_expand_cmd_remaps() {
+        let resolved = default_shortcuts();
+        let app_quit = resolved
+            .gtk_accel_entries()
+            .into_iter()
+            .find(|(action, _)| *action == "app.quit")
+            .map(|(_, accels)| accels)
+            .unwrap();
+        assert_eq!(app_quit, vec!["<Ctrl>q".to_string()]);
+
+        let remapped = resolve_shortcuts_from_str(
+            r#"{
+                "shortcuts": {
+                    "quit_app": "<Super>q"
+                }
+            }"#,
+        )
+        .unwrap();
+        let remapped_quit = remapped
+            .gtk_accel_entries()
+            .into_iter()
+            .find(|(action, _)| *action == "app.quit")
+            .map(|(_, accels)| accels)
+            .unwrap();
+        assert_eq!(
+            remapped_quit,
+            vec!["<Meta>q".to_string(), "<Super>q".to_string()]
+        );
+    }
+
+    #[test]
     fn resolved_shortcuts_route_runtime_combos_to_canonical_commands() {
         let resolved = default_shortcuts();
 
         assert_eq!(
             resolved.command_for_runtime_combo("ctrl+t"),
             Some(ShortcutCommand::NewTerminal)
+        );
+        assert_eq!(resolved.command_for_runtime_combo("ctrl+c"), None);
+        assert_eq!(
+            resolved.command_for_runtime_combo("ctrl+shift+c"),
+            Some(ShortcutCommand::TerminalCopy)
         );
         assert_eq!(
             resolved.command_for_runtime_combo("ctrl+shift+t"),
@@ -1514,7 +1976,7 @@ mod tests {
         let defaults = default_shortcuts();
         assert_eq!(
             defaults.tooltip_text(ShortcutId::ToggleSidebar, "Toggle Sidebar"),
-            "Toggle Sidebar (Ctrl+B)"
+            "Toggle Sidebar (Ctrl+M)"
         );
 
         let remapped = resolve_shortcuts_from_str(
@@ -1545,7 +2007,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_shortcuts_from_str_rejects_bindings_without_ctrl_or_alt() {
+    fn resolve_shortcuts_from_str_rejects_bindings_without_ctrl_alt_or_cmd() {
         let err = resolve_shortcuts_from_str(
             r#"{
                 "shortcuts": {
@@ -1560,6 +2022,58 @@ mod tests {
             ShortcutConfigError::BaseModifierRequired { shortcut_id, .. }
                 if shortcut_id == "split_right"
         ));
+    }
+
+    #[test]
+    fn resolve_shortcuts_from_str_allows_unmodified_fullscreen_binding() {
+        let resolved = resolve_shortcuts_from_str(
+            r#"{
+                "shortcuts": {
+                    "toggle_fullscreen": "F11"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved
+                .display_label_for_id(ShortcutId::ToggleFullscreen)
+                .as_deref(),
+            Some("F11")
+        );
+        assert_eq!(
+            resolved.command_for_runtime_combo("f11"),
+            Some(ShortcutCommand::ToggleFullscreen)
+        );
+        assert_eq!(
+            resolved
+                .find_by_id(ShortcutId::ToggleFullscreen)
+                .map(ResolvedShortcut::gtk_accel_variants),
+            Some(vec!["F11".to_string()])
+        );
+    }
+
+    #[test]
+    fn resolve_shortcuts_from_str_accepts_super_based_bindings() {
+        let resolved = resolve_shortcuts_from_str(
+            r#"{
+                "shortcuts": {
+                    "split_right": "<Super>h"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved
+                .display_label_for_id(ShortcutId::SplitRight)
+                .as_deref(),
+            Some("Cmd+H")
+        );
+        assert_eq!(
+            resolved.command_for_runtime_combo("cmd+h"),
+            Some(ShortcutCommand::SplitRight)
+        );
     }
 
     #[test]

@@ -101,19 +101,65 @@ Repository maintainability rules live in [`docs/maintainability.md`](docs/mainta
 
 ## Keyboard shortcuts
 
+Most default shortcuts use `Ctrl`. Fullscreen defaults to `F11`. Custom remaps may also use `Cmd`, which Limux maps to either the Linux `Meta` or `Super` modifier. `Opt` maps to `Alt`.
+
+### App
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+Q` | Quit Limux |
+| `Ctrl+Alt+N` | Open a new Limux instance |
+| `F11` | Toggle fullscreen |
+
+### Browser
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+Shift+L` | Open the focused browser page in a new split |
+| `Ctrl+L` | Focus browser address bar |
+| `Ctrl+[` | Browser back |
+| `Ctrl+]` | Browser forward |
+| `Ctrl+R` | Browser reload |
+| `Ctrl+Alt+I` | Open Web Inspector |
+| `Ctrl+Alt+C` | Open Web Inspector (console-only targeting is not exposed by WebKitGTK) |
+
+### Find
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+F` | Open find on the focused terminal or browser |
+| `Ctrl+G` | Find next |
+| `Ctrl+Shift+G` | Find previous |
+| `Ctrl+Shift+F` | Hide find |
+| `Ctrl+E` | Use selection for find |
+
+### Terminal
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+K` | Clear scrollback |
+| `Ctrl+C` | Copy selection |
+| `Ctrl+V` | Paste |
+| `Ctrl++` | Increase font size |
+| `Ctrl+-` | Decrease font size |
+| `Ctrl+Shift+0` | Reset font size |
+
+### Workspace And Pane
+
 | Shortcut | Action |
 |---|---|
 | `Ctrl+Shift+N` | New workspace (folder picker) |
 | `Ctrl+Shift+W` | Close workspace |
 | `Ctrl+Shift+Left/Right` | Cycle tabs in focused pane |
 | `Ctrl+Shift+D` | Split down |
-| `Ctrl+Shift+T` | New terminal tab |
+| `Ctrl+Shift+T` | New terminal tab in the focused pane |
 | `Ctrl+D` | Split right |
 | `Ctrl+W` | Close focused pane |
-| `Ctrl+B` | Toggle sidebar |
+| `Ctrl+M` | Toggle sidebar |
+| `Ctrl+Shift+M` | Toggle top bar |
 | `Ctrl+T` | New terminal tab |
 | `Ctrl+Arrow` | Focus pane in direction |
-| `Ctrl+PageDown/Up` | Next/prev workspace |
+| `Ctrl+PageDown/Up` | Next or previous workspace |
 | `Ctrl+1-9` | Switch to workspace by number |
 
 ## Architecture
