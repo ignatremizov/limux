@@ -29,6 +29,7 @@ type PaneSplitCallback = dyn Fn(&gtk::Widget, gtk::Orientation);
 type PaneWidgetCallback = dyn Fn(&gtk::Widget);
 type PaneSignalCallback = dyn Fn();
 type PanePathCallback = dyn Fn(&str);
+type PaneOpenBrowserHereCallback = dyn Fn(&gtk::Widget);
 type PaneShortcutStateCallback = dyn Fn() -> Rc<ResolvedShortcutConfig>;
 type PaneShortcutCaptureCallback =
     dyn Fn(ShortcutId, Option<NormalizedShortcut>) -> Result<ResolvedShortcutConfig, String>;
@@ -37,6 +38,7 @@ pub struct PaneCallbacks {
     pub on_split: Box<PaneSplitCallback>,
     pub on_close_pane: Box<PaneWidgetCallback>,
     pub on_bell: Box<PaneSignalCallback>,
+    pub on_open_browser_here: Box<PaneOpenBrowserHereCallback>,
     pub on_open_keybinds: Box<PaneWidgetCallback>,
     pub current_shortcuts: Box<PaneShortcutStateCallback>,
     pub on_capture_shortcut: Rc<PaneShortcutCaptureCallback>,
@@ -723,6 +725,7 @@ fn add_terminal_tab_inner(
         let state_for_close = tab_state.clone();
         let tid_for_close = tab_id.clone();
         let cb_close = callbacks.clone();
+        let cb_browser_here = callbacks.clone();
         let po = pane_outer.clone();
         let cb_state = callbacks.clone();
         let term_cwd_for_pwd = term_cwd.clone();
@@ -767,6 +770,13 @@ fn add_terminal_tab_inner(
                 glib::idle_add_local_once(move || {
                     remove_tab(&ts, &cs, &state, &tid, &cb, &po);
                 });
+            }),
+            on_open_browser_here: Box::new({
+                let po = pane_outer.clone();
+                move || {
+                    let pane_widget: gtk::Widget = po.clone().upcast();
+                    (cb_browser_here.on_open_browser_here)(&pane_widget);
+                }
             }),
             on_split_right: Box::new({
                 let cb = callbacks.clone();

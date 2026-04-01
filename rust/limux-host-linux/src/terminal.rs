@@ -479,6 +479,7 @@ pub struct TerminalCallbacks {
     pub on_pwd_changed: Box<PwdChangedCallback>,
     pub on_bell: Box<VoidCallback>,
     pub on_close: Box<VoidCallback>,
+    pub on_open_browser_here: Box<VoidCallback>,
     pub on_split_right: Box<VoidCallback>,
     pub on_split_down: Box<VoidCallback>,
     pub on_open_keybinds: Box<WidgetCallback>,
@@ -1007,6 +1008,7 @@ fn show_terminal_context_menu(
         ("Copy", has_selection),
         ("Paste", true),
         ("---", false),
+        ("Browser", true),
         ("Split Right", true),
         ("Split Down", true),
         ("Keybinds", true),
@@ -1053,6 +1055,9 @@ fn show_terminal_context_menu(
                 match label.as_str() {
                     "Copy" => surface_action(surface, "copy_to_clipboard"),
                     "Paste" => surface_action(surface, "paste_from_clipboard"),
+                    "Browser" => {
+                        (cb.on_open_browser_here)();
+                    }
                     "Split Right" => (cb.on_split_right)(),
                     "Split Down" => (cb.on_split_down)(),
                     "Keybinds" => {
