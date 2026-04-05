@@ -19,17 +19,17 @@ https://github.com/user-attachments/assets/6f3047c2-e2b6-49f2-b536-570a1570d0f8
 
 ## Install
 
-Download the latest release from [GitHub Releases](https://github.com/ignatremizov/limux/releases).
+Download the latest release from [GitHub Releases](https://github.com/am-will/limux/releases).
 
-**Debian/Ubuntu (.deb)** — recommended, shows up in app launcher immediately:
+**Debian/Ubuntu (.deb)** — recommended:
 ```bash
-sudo apt install ./limux_0.1.0_amd64.deb
+sudo dpkg -i ./limux_0.1.7_amd64.deb
 ```
 
 **AppImage** — portable, no install needed:
 ```bash
-chmod +x Limux-0.1.0-x86_64.AppImage
-./Limux-0.1.0-x86_64.AppImage
+chmod +x Limux-0.1.7-x86_64.AppImage
+./Limux-0.1.7-x86_64.AppImage
 ```
 
 **Tarball** — manual install:
@@ -39,12 +39,12 @@ cd limux-*-linux-x86_64
 sudo ./install.sh
 ```
 
-**Arch Linux (unofficial AUR package)** — community-maintained:
+**Arch Linux (unofficial AUR package)** — community-maintained by [antonbarchukov](https://github.com/antonbarchukov):
 ```bash
 yay -S limux-bin
 ```
 
-The AUR package is available at [`limux-bin`](https://aur.archlinux.org/packages/limux-bin).
+The AUR package is available at [`limux-bin`](https://aur.archlinux.org/packages/limux-bin). Thanks to [antonbarchukov](https://github.com/antonbarchukov) for packaging Limux for Arch users. Arch packaging is not currently maintained by upstream; please report AUR packaging issues to the package maintainer first. See [issue #5](https://github.com/am-will/limux/issues/5).
 
 To uninstall:
 ```bash
@@ -144,8 +144,8 @@ Most default shortcuts use `Ctrl`. Fullscreen defaults to `F11`. Custom remaps m
 | Shortcut | Action |
 |---|---|
 | `Ctrl+K` | Clear scrollback |
-| `Ctrl+C` | Copy selection |
-| `Ctrl+V` | Paste |
+| `Ctrl+Shift+C` | Copy selection |
+| `Ctrl+Shift+V` | Paste |
 | `Ctrl++` | Increase font size |
 | `Ctrl+-` | Decrease font size |
 | `Ctrl+Shift+0` | Reset font size |

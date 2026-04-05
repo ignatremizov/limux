@@ -35,6 +35,7 @@ static WAKEUP_IDLE_QUEUED: AtomicBool = AtomicBool::new(false);
 
 type TitleChangedCallback = dyn Fn(&str);
 type PwdChangedCallback = dyn Fn(&str);
+type DesktopNotificationCallback = dyn Fn(&str, &str);
 type VoidCallback = dyn Fn();
 type WidgetCallback = dyn Fn(&gtk::Widget);
 
@@ -44,6 +45,7 @@ struct SurfaceEntry {
     toast_overlay: gtk::Overlay,
     on_title_changed: Option<Box<TitleChangedCallback>>,
     on_pwd_changed: Option<Box<PwdChangedCallback>>,
+    on_desktop_notification: Option<Box<DesktopNotificationCallback>>,
     on_bell: Option<Box<VoidCallback>>,
     on_close: Option<Box<VoidCallback>>,
     clipboard_context: *mut ClipboardContext,
@@ -149,9 +151,14 @@ pub struct TerminalHandle {
     gl_area: gtk::GLArea,
     search_bar: gtk::SearchBar,
     search_entry: gtk::SearchEntry,
+    callbacks: Rc<RefCell<TerminalCallbacks>>,
 }
 
 impl TerminalHandle {
+    pub fn replace_callbacks(&self, callbacks: TerminalCallbacks) {
+        *self.callbacks.borrow_mut() = callbacks;
+    }
+
     pub fn perform_binding_action(&self, action: &str) -> bool {
         let surface = *self.surface_cell.borrow();
         surface_action(surface, action);
@@ -349,6 +356,7 @@ pub fn init_ghostty() {
             supports_selection_clipboard: true,
             wakeup_cb: ghostty_wakeup_cb,
             action_cb: ghostty_action_cb,
+            clipboard_has_text_cb: ghostty_clipboard_has_text_cb,
             read_clipboard_cb: ghostty_read_clipboard_cb,
             confirm_read_clipboard_cb: ghostty_confirm_read_clipboard_cb,
             write_clipboard_cb: ghostty_write_clipboard_cb,
@@ -500,6 +508,37 @@ unsafe extern "C" fn ghostty_action_cb(
             }
             true
         }
+        GHOSTTY_ACTION_DESKTOP_NOTIFICATION => {
+            if target.tag == GHOSTTY_TARGET_SURFACE {
+                let surface_key = unsafe { target.target.surface } as usize;
+                let title_ptr = unsafe { action.action.desktop_notification.title };
+                let body_ptr = unsafe { action.action.desktop_notification.body };
+                let title = if title_ptr.is_null() {
+                    String::new()
+                } else {
+                    unsafe { std::ffi::CStr::from_ptr(title_ptr) }
+                        .to_str()
+                        .unwrap_or("")
+                        .to_string()
+                };
+                let body = if body_ptr.is_null() {
+                    String::new()
+                } else {
+                    unsafe { std::ffi::CStr::from_ptr(body_ptr) }
+                        .to_str()
+                        .unwrap_or("")
+                        .to_string()
+                };
+                SURFACE_MAP.with(|map| {
+                    if let Some(entry) = map.borrow().get(&surface_key) {
+                        if let Some(cb) = &entry.on_desktop_notification {
+                            cb(&title, &body);
+                        }
+                    }
+                });
+            }
+            true
+        }
         GHOSTTY_ACTION_PWD => {
             if target.tag == GHOSTTY_TARGET_SURFACE {
                 let surface_key = unsafe { target.target.surface } as usize;
@@ -598,11 +637,7 @@ unsafe extern "C" fn ghostty_read_clipboard_cb(
         Some(d) => d,
         None => return,
     };
-    let clipboard = if clipboard_type == GHOSTTY_CLIPBOARD_SELECTION {
-        display.primary_clipboard()
-    } else {
-        display.clipboard()
-    };
+    let clipboard = clipboard_from_type(&display, clipboard_type);
 
     clipboard.read_text_async(gtk::gio::Cancellable::NONE, move |result| {
         // Get clipboard text, defaulting to empty string on failure
@@ -619,6 +654,58 @@ unsafe extern "C" fn ghostty_read_clipboard_cb(
             }
         }
     });
+}
+
+fn clipboard_from_type(display: &gtk::gdk::Display, clipboard_type: c_int) -> gtk::gdk::Clipboard {
+    if clipboard_type == GHOSTTY_CLIPBOARD_SELECTION {
+        display.primary_clipboard()
+    } else {
+        display.clipboard()
+    }
+}
+
+fn clipboard_has_text(clipboard: &gtk::gdk::Clipboard) -> bool {
+    let formats = clipboard.formats();
+    let mime_types = formats.mime_types();
+    if clipboard_formats_include_image(mime_types.iter().map(|mime| mime.as_str())) {
+        return false;
+    }
+
+    clipboard_formats_include_text(
+        formats.contains_type(String::static_type()),
+        mime_types.iter().map(|mime| mime.as_str()),
+    )
+}
+
+fn clipboard_formats_include_image<'a>(mime_types: impl IntoIterator<Item = &'a str>) -> bool {
+    mime_types
+        .into_iter()
+        .any(|mime| mime.starts_with("image/"))
+}
+
+fn clipboard_formats_include_text<'a>(
+    has_string_type: bool,
+    mime_types: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    if !has_string_type {
+        return false;
+    }
+
+    mime_types.into_iter().any(|mime| {
+        mime.eq_ignore_ascii_case("text/plain")
+            || mime.eq_ignore_ascii_case("text/plain;charset=utf-8")
+    })
+}
+
+unsafe extern "C" fn ghostty_clipboard_has_text_cb(
+    _userdata: *mut c_void,
+    clipboard_type: c_int,
+) -> bool {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return false;
+    };
+    let clipboard = clipboard_from_type(&display, clipboard_type);
+    clipboard_has_text(&clipboard)
 }
 
 unsafe extern "C" fn ghostty_confirm_read_clipboard_cb(
@@ -712,6 +799,7 @@ unsafe extern "C" fn ghostty_close_surface_cb(userdata: *mut c_void, _process_al
 pub struct TerminalCallbacks {
     pub on_title_changed: Box<TitleChangedCallback>,
     pub on_pwd_changed: Box<PwdChangedCallback>,
+    pub on_desktop_notification: Box<DesktopNotificationCallback>,
     pub on_bell: Box<VoidCallback>,
     pub on_close: Box<VoidCallback>,
     pub on_open_browser_here: Box<VoidCallback>,
@@ -745,8 +833,8 @@ pub fn create_terminal(
     });
 
     let wd = working_directory.map(|s| s.to_string());
-    let callbacks = Rc::new(callbacks);
     let hover_focus = options.hover_focus;
+    let callbacks = Rc::new(RefCell::new(callbacks));
     let surface_cell: Rc<RefCell<Option<ghostty_surface_t>>> = Rc::new(RefCell::new(None));
     let had_focus = Rc::new(Cell::new(false));
     let clipboard_context_cell: Rc<Cell<*mut ClipboardContext>> =
@@ -783,6 +871,7 @@ pub fn create_terminal(
         gl_area: gl_area.clone(),
         search_bar: search_bar.clone(),
         search_entry: search_entry.clone(),
+        callbacks: callbacks.clone(),
     };
 
     {
@@ -917,19 +1006,38 @@ pub fn create_terminal(
                         toast_overlay: overlay_for_map.clone(),
                         on_title_changed: Some(Box::new({
                             let cb = callbacks.clone();
-                            move |title| (cb.on_title_changed)(title)
+                            move |title| {
+                                let callbacks = cb.borrow();
+                                (callbacks.on_title_changed)(title);
+                            }
                         })),
                         on_pwd_changed: Some(Box::new({
                             let cb = callbacks.clone();
-                            move |pwd| (cb.on_pwd_changed)(pwd)
+                            move |pwd| {
+                                let callbacks = cb.borrow();
+                                (callbacks.on_pwd_changed)(pwd);
+                            }
+                        })),
+                        on_desktop_notification: Some(Box::new({
+                            let cb = callbacks.clone();
+                            move |title, body| {
+                                let callbacks = cb.borrow();
+                                (callbacks.on_desktop_notification)(title, body);
+                            }
                         })),
                         on_bell: Some(Box::new({
                             let cb = callbacks.clone();
-                            move || (cb.on_bell)()
+                            move || {
+                                let callbacks = cb.borrow();
+                                (callbacks.on_bell)();
+                            }
                         })),
                         on_close: Some(Box::new({
                             let cb = callbacks.clone();
-                            move || (cb.on_close)()
+                            move || {
+                                let callbacks = cb.borrow();
+                                (callbacks.on_close)();
+                            }
                         })),
                         clipboard_context,
                     },
@@ -1323,7 +1431,7 @@ fn surface_action(surface: Option<ghostty_surface_t>, action: &str) {
 fn show_terminal_context_menu(
     gl_area: &gtk::GLArea,
     surface: Option<ghostty_surface_t>,
-    callbacks: &Rc<TerminalCallbacks>,
+    callbacks: &Rc<RefCell<TerminalCallbacks>>,
     x: f64,
     y: f64,
 ) {
@@ -1389,15 +1497,23 @@ fn show_terminal_context_menu(
                     "Copy" => surface_action(surface, "copy_to_clipboard"),
                     "Paste" => surface_action(surface, "paste_from_clipboard"),
                     "Browser" => {
-                        (cb.on_open_browser_here)();
+                        let callbacks = cb.borrow();
+                        (callbacks.on_open_browser_here)();
                     }
-                    "Split Right" => (cb.on_split_right)(),
-                    "Split Down" => (cb.on_split_down)(),
+                    "Split Right" => {
+                        let callbacks = cb.borrow();
+                        (callbacks.on_split_right)();
+                    }
+                    "Split Down" => {
+                        let callbacks = cb.borrow();
+                        (callbacks.on_split_down)();
+                    }
                     "Keybinds" => {
                         let anchor: gtk::Widget = gl_area.clone().upcast();
                         let cb = cb.clone();
                         glib::timeout_add_local_once(Duration::from_millis(80), move || {
-                            (cb.on_open_keybinds)(&anchor);
+                            let callbacks = cb.borrow();
+                            (callbacks.on_open_keybinds)(&anchor);
                         });
                     }
                     "Clear" => surface_action(surface, "clear_screen"),
@@ -1797,6 +1913,15 @@ mod tests {
             shell_escape_bytes(path),
             b"$'/tmp/line\\nbreak\\tand\\x03escape\\e'"
         );
+    }
+
+    #[test]
+    fn clipboard_formats_include_text_rejects_image_clipboards() {
+        assert!(clipboard_formats_include_text(
+            true,
+            ["text/plain", "text/plain;charset=utf-8"]
+        ));
+        assert!(clipboard_formats_include_image(["image/png", "text/plain"]));
     }
 
     #[test]

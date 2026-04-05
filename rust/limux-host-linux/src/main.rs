@@ -147,9 +147,14 @@ fn main() {
     // Initialize Ghostty before GTK app starts
     terminal::init_ghostty();
 
-    let app = adw::Application::builder().application_id(APP_ID).build();
+    let app = adw::Application::builder()
+        .application_id(APP_ID)
+        .flags(adw::gio::ApplicationFlags::NON_UNIQUE)
+        .build();
 
-    app.connect_activate(window::build_window);
+    app.connect_activate(move |app| {
+        window::build_window(app);
+    });
     app.run();
 }
 
@@ -206,6 +211,7 @@ mod tests {
 
         fs::remove_dir_all(root).unwrap();
     }
+
     #[test]
     fn rejects_resource_dirs_without_sibling_terminfo() {
         let root = temp_path("missing-terminfo");

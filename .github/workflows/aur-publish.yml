@@ -33,8 +33,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
-          REPO="${{ github.repository }}"
-          TARBALL_URL="https://github.com/${REPO}/releases/download/v${VERSION}/limux-${VERSION}-linux-x86_64.tar.gz"
+          TARBALL_URL="https://github.com/am-will/limux/releases/download/v${VERSION}/limux-${VERSION}-linux-x86_64.tar.gz"
 
           for i in 1 2 3 4 5; do
             curl -fL "$TARBALL_URL" -o /tmp/limux.tar.gz && break

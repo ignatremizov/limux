@@ -330,6 +330,7 @@ pub struct ghostty_surface_message_childexited_s {
 pub type ghostty_runtime_wakeup_cb = unsafe extern "C" fn(*mut c_void);
 pub type ghostty_runtime_action_cb =
     unsafe extern "C" fn(ghostty_app_t, ghostty_target_s, ghostty_action_s) -> bool;
+pub type ghostty_runtime_clipboard_has_text_cb = unsafe extern "C" fn(*mut c_void, c_int) -> bool;
 pub type ghostty_runtime_read_clipboard_cb = unsafe extern "C" fn(*mut c_void, c_int, *mut c_void);
 pub type ghostty_runtime_confirm_read_clipboard_cb =
     unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_void, c_int);
@@ -343,6 +344,7 @@ pub struct ghostty_runtime_config_s {
     pub supports_selection_clipboard: bool,
     pub wakeup_cb: ghostty_runtime_wakeup_cb,
     pub action_cb: ghostty_runtime_action_cb,
+    pub clipboard_has_text_cb: ghostty_runtime_clipboard_has_text_cb,
     pub read_clipboard_cb: ghostty_runtime_read_clipboard_cb,
     pub confirm_read_clipboard_cb: ghostty_runtime_confirm_read_clipboard_cb,
     pub write_clipboard_cb: ghostty_runtime_write_clipboard_cb,

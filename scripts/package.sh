@@ -13,6 +13,7 @@ PKG_BASE="limux-${VERSION}-linux-${ARCH}"
 STAGE="/tmp/limux-staging"
 GHOSTTY_SO="${ROOT_DIR}/ghostty/zig-out/lib/libghostty.so"
 GHOSTTY_SHARE_DIR=""
+GHOSTTY_TERMINFO_DIR=""
 ICONS_DIR="${ROOT_DIR}/rust/limux-host-linux/icons"
 APP_ICONS_DIR="${ROOT_DIR}/rust/limux-host-linux/icons/app"
 DESKTOP_FILE="${ROOT_DIR}/rust/limux-host-linux/dev.limux.linux.desktop"
@@ -46,6 +47,41 @@ resolve_ghostty_share_dir() {
     done
 
     return 1
+}
+
+resolve_ghostty_terminfo_dir() {
+    local candidate
+    local parent
+
+    parent="$(dirname "$GHOSTTY_SHARE_DIR")"
+
+    for candidate in \
+        "${parent}/terminfo" \
+        "/usr/local/share/terminfo" \
+        "/usr/share/terminfo"
+    do
+        if [ -f "${candidate}/g/ghostty" ] || [ -f "${candidate}/x/xterm-ghostty" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+copy_ghostty_terminfo_entries() {
+    local source_dir="$1"
+    local dest_dir="$2"
+
+    mkdir -p "${dest_dir}/g" "${dest_dir}/x"
+
+    if [ -f "${source_dir}/g/ghostty" ]; then
+        cp "${source_dir}/g/ghostty" "${dest_dir}/g/ghostty"
+    fi
+
+    if [ -f "${source_dir}/x/xterm-ghostty" ]; then
+        cp "${source_dir}/x/xterm-ghostty" "${dest_dir}/x/xterm-ghostty"
+    fi
 }
 
 echo "=== Limux Packager ==="
@@ -83,6 +119,15 @@ if ! GHOSTTY_SHARE_DIR="$(resolve_ghostty_share_dir)"; then
     exit 1
 fi
 
+if ! GHOSTTY_TERMINFO_DIR="$(resolve_ghostty_terminfo_dir)"; then
+    echo "ERROR: Ghostty terminfo directory not found."
+    echo "Looked for:"
+    echo "  $(dirname "$GHOSTTY_SHARE_DIR")/terminfo"
+    echo "  /usr/local/share/terminfo"
+    echo "  /usr/share/terminfo"
+    exit 1
+fi
+
 # Build release binary
 echo "Building release binary..."
 cargo build --release --manifest-path "${ROOT_DIR}/Cargo.toml"
@@ -106,7 +151,8 @@ populate_tree() {
     local prefix="${2:-/usr/local}"
     local bindir="$dest${prefix}/bin"
     local libdir="$dest${prefix}/lib/limux"
-    local ghostty_resdir="$dest${prefix}/share/limux"
+    local ghostty_datadir="$dest${prefix}/share/limux"
+    local ghostty_resdir="$ghostty_datadir/ghostty"
     local appdir="$dest${prefix}/share/applications"
     local metadatadir="$dest${prefix}/share/metainfo"
     local icondir="$dest${prefix}/share/icons/hicolor"
@@ -123,7 +169,8 @@ populate_tree() {
     strip --strip-debug "$libdir/libghostty.so"
 
     # Ghostty resources required for named themes and shell integration
-    cp -r "$GHOSTTY_SHARE_DIR" "$ghostty_resdir/ghostty"
+    cp -r "$GHOSTTY_SHARE_DIR"/. "$ghostty_resdir"
+    copy_ghostty_terminfo_entries "$GHOSTTY_TERMINFO_DIR" "$ghostty_datadir/terminfo"
 
     # Desktop file
     cp "$DESKTOP_FILE" "$appdir/dev.limux.linux.desktop"
@@ -156,7 +203,7 @@ echo ""
 echo "--- Building tarball ---"
 TARBALL_STAGE="/tmp/${PKG_BASE}"
 remove_tree "$TARBALL_STAGE"
-mkdir -p "$TARBALL_STAGE"/{lib,share/limux,share/applications,share/icons/hicolor/scalable/actions}
+mkdir -p "$TARBALL_STAGE"/{lib,share/limux/ghostty,share/limux/terminfo,share/applications,share/icons/hicolor/scalable/actions}
 mkdir -p "$TARBALL_STAGE/share/metainfo"
 
 cp "$BINARY" "$TARBALL_STAGE/limux"
@@ -164,7 +211,8 @@ strip "$TARBALL_STAGE/limux"
 chmod 755 "$TARBALL_STAGE/limux"
 cp "$GHOSTTY_SO" "$TARBALL_STAGE/lib/libghostty.so"
 strip --strip-debug "$TARBALL_STAGE/lib/libghostty.so"
-cp -r "$GHOSTTY_SHARE_DIR" "$TARBALL_STAGE/share/limux/ghostty"
+cp -r "$GHOSTTY_SHARE_DIR"/. "$TARBALL_STAGE/share/limux/ghostty"
+copy_ghostty_terminfo_entries "$GHOSTTY_TERMINFO_DIR" "$TARBALL_STAGE/share/limux/terminfo"
 cp "$DESKTOP_FILE" "$TARBALL_STAGE/share/applications/dev.limux.linux.desktop"
 cp "$METADATA_FILE" "$TARBALL_STAGE/share/metainfo/dev.limux.linux.metainfo.xml"
 

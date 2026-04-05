@@ -429,6 +429,7 @@ pub(crate) fn build_split_node_from_layout(
                 ws_id,
                 working_directory,
                 Some(pane_state),
+                false,
             );
             SplitNode::Leaf {
                 pane_widget: pane.upcast(),

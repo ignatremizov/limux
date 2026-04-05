@@ -4,13 +4,13 @@ pkgver=@@VERSION@@
 pkgrel=1
 pkgdesc="GPU-accelerated terminal workspace manager for Linux, powered by Ghostty's rendering engine (cmux port)"
 arch=('x86_64')
-url="https://github.com/ignatremizov/limux"
+url="https://github.com/am-will/limux"
 license=('MIT')
 depends=('gtk4' 'libadwaita' 'webkitgtk-6.0')
 provides=('limux')
 conflicts=('limux')
 options=(!debug !strip)
-source=("limux-${pkgver}.tar.gz::https://github.com/ignatremizov/limux/releases/download/v${pkgver}/limux-${pkgver}-linux-x86_64.tar.gz")
+source=("limux-${pkgver}.tar.gz::https://github.com/am-will/limux/releases/download/v${pkgver}/limux-${pkgver}-linux-x86_64.tar.gz")
 sha256sums=('@@SHA256@@')
 
 package() {
