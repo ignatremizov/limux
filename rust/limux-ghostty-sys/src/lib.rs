@@ -403,6 +403,7 @@ extern "C" {
     pub fn ghostty_surface_size(surface: ghostty_surface_t) -> ghostty_surface_size_s;
     pub fn ghostty_surface_key(surface: ghostty_surface_t, event: ghostty_input_key_s) -> bool;
     pub fn ghostty_surface_text(surface: ghostty_surface_t, text: *const c_char, len: usize);
+    pub fn ghostty_surface_preedit(surface: ghostty_surface_t, text: *const c_char, len: usize);
     pub fn ghostty_surface_mouse_button(
         surface: ghostty_surface_t,
         state: c_int,
@@ -411,6 +412,13 @@ extern "C" {
     ) -> bool;
     pub fn ghostty_surface_mouse_pos(surface: ghostty_surface_t, x: f64, y: f64, mods: c_int);
     pub fn ghostty_surface_mouse_scroll(surface: ghostty_surface_t, x: f64, y: f64, mods: c_int);
+    pub fn ghostty_surface_ime_point(
+        surface: ghostty_surface_t,
+        x: *mut f64,
+        y: *mut f64,
+        width: *mut f64,
+        height: *mut f64,
+    );
     pub fn ghostty_surface_request_close(surface: ghostty_surface_t);
     pub fn ghostty_surface_set_color_scheme(surface: ghostty_surface_t, scheme: c_int);
 
