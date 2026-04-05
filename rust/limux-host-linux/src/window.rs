@@ -423,8 +423,7 @@ fn build_workspace_root(
             (root, container)
         }
         None => {
-            let pane =
-                create_pane_for_workspace(state, shortcuts, ws_id, working_directory, None);
+            let pane = create_pane_for_workspace(state, shortcuts, ws_id, working_directory, None);
             let container = SplitTreeContainer::new(state, pane.clone().upcast());
             let root = container.widget().clone().upcast::<gtk::Widget>();
             (root, container)
