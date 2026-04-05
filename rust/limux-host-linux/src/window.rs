@@ -12,13 +12,13 @@ use libadwaita as adw;
 use crate::app_config;
 use crate::keybind_editor;
 use crate::layout_state::{
-    self, AppSessionState, LayoutNodeState, LoadedSession, PaneState, SplitOrientation, SplitState,
-    WorkspaceState,
+    self, AppSessionState, LayoutNodeState, LoadedSession, PaneState, WorkspaceState,
 };
 use crate::pane::{self, PaneCallbacks};
 use crate::shortcut_config::{
     self, EditableCapturePolicy, ResolvedShortcutConfig, ShortcutCommand, ShortcutId,
 };
+use crate::split_tree::{self, SplitTreeContainer};
 
 // ---------------------------------------------------------------------------
 // State
@@ -29,6 +29,8 @@ struct Workspace {
     name: String,
     /// The root widget in the content stack for this workspace.
     root: gtk::Widget,
+    /// Manages the split tree data model and async widget rebuild.
+    split_container: Rc<SplitTreeContainer>,
     /// The sidebar row widget.
     sidebar_row: gtk::ListBoxRow,
     /// Name label in sidebar row.
@@ -52,7 +54,7 @@ struct Workspace {
     path_label: gtk::Label,
 }
 
-struct AppState {
+pub(crate) struct AppState {
     app: adw::Application,
     window: adw::ApplicationWindow,
     top_bar: Option<adw::HeaderBar>,
@@ -84,7 +86,7 @@ impl AppState {
     }
 }
 
-type State = Rc<RefCell<AppState>>;
+pub(crate) type State = Rc<RefCell<AppState>>;
 const SPLIT_RATIO_STATE_KEY: &str = "limux-split-ratio-state";
 const PORTAL_DESKTOP_SERVICE: &str = "org.freedesktop.portal.Desktop";
 const PORTAL_DESKTOP_PATH: &str = "/org/freedesktop/portal/desktop";
@@ -269,7 +271,10 @@ fn snapshot_session_state(state: &State) -> AppSessionState {
                 favorite: workspace.favorite,
                 cwd,
                 folder_path,
-                layout: snapshot_layout_node(&workspace.root, working_directory.as_deref()),
+                layout: workspace
+                    .split_container
+                    .tree()
+                    .snapshot(working_directory.as_deref()),
             }
         })
         .collect();
@@ -323,7 +328,7 @@ fn split_ratio_state(paned: &gtk::Paned) -> Option<Rc<RefCell<f64>>> {
     }
 }
 
-fn update_split_ratio_state(paned: &gtk::Paned, ratio: f64) {
+pub(crate) fn update_split_ratio_state(paned: &gtk::Paned, ratio: f64) {
     let ratio = layout_state::clamp_split_ratio(ratio);
     if let Some(stored_ratio) = split_ratio_state(paned) {
         *stored_ratio.borrow_mut() = ratio;
@@ -334,101 +339,41 @@ fn update_split_ratio_state(paned: &gtk::Paned, ratio: f64) {
     }
 }
 
-fn snapshot_layout_node(widget: &gtk::Widget, working_directory: Option<&str>) -> LayoutNodeState {
-    if let Some(paned) = widget.downcast_ref::<gtk::Paned>() {
-        let size = if paned.orientation() == gtk::Orientation::Horizontal {
-            paned.allocation().width()
-        } else {
-            paned.allocation().height()
-        };
-        let ratio = layout_state::snapshot_split_ratio(
-            paned.position(),
-            size,
-            split_ratio_state(paned).map(|ratio| *ratio.borrow()),
-        );
-        update_split_ratio_state(paned, ratio);
-        let start = paned
-            .start_child()
-            .map(|child| snapshot_layout_node(&child, working_directory))
-            .unwrap_or_else(|| LayoutNodeState::Pane(PaneState::fallback(working_directory)));
-        let end = paned
-            .end_child()
-            .map(|child| snapshot_layout_node(&child, working_directory))
-            .unwrap_or_else(|| LayoutNodeState::Pane(PaneState::fallback(working_directory)));
-        return LayoutNodeState::Split(SplitState {
-            orientation: if paned.orientation() == gtk::Orientation::Horizontal {
-                SplitOrientation::Horizontal
-            } else {
-                SplitOrientation::Vertical
-            },
-            ratio,
-            start: Box::new(start),
-            end: Box::new(end),
-        });
-    }
-
-    pane::snapshot_pane_state(widget)
-        .map(LayoutNodeState::Pane)
-        .unwrap_or_else(|| LayoutNodeState::Pane(PaneState::fallback(working_directory)))
-}
-
 fn build_workspace_root(
     state: &State,
     shortcuts: &Rc<ResolvedShortcutConfig>,
     ws_id: &str,
     working_directory: Option<&str>,
     layout: Option<&LayoutNodeState>,
-) -> gtk::Widget {
+) -> (gtk::Widget, Rc<SplitTreeContainer>) {
     match layout {
-        Some(layout) => build_layout_widget(state, shortcuts, ws_id, working_directory, layout),
-        None => {
-            create_pane_for_workspace(state, shortcuts, ws_id, working_directory, None).upcast()
-        }
-    }
-}
-
-fn build_layout_widget(
-    state: &State,
-    shortcuts: &Rc<ResolvedShortcutConfig>,
-    ws_id: &str,
-    working_directory: Option<&str>,
-    layout: &LayoutNodeState,
-) -> gtk::Widget {
-    match layout {
-        LayoutNodeState::Pane(pane_state) => {
-            create_pane_for_workspace(state, shortcuts, ws_id, working_directory, Some(pane_state))
-                .upcast()
-        }
-        LayoutNodeState::Split(split_state) => {
-            let orientation = match split_state.orientation {
-                SplitOrientation::Horizontal => gtk::Orientation::Horizontal,
-                SplitOrientation::Vertical => gtk::Orientation::Vertical,
-            };
-            let paned = gtk::Paned::builder()
-                .orientation(orientation)
-                .hexpand(true)
-                .vexpand(true)
-                .build();
-            update_split_ratio_state(&paned, split_state.ratio);
-            attach_split_position_persistence(state, &paned);
-            let start = build_layout_widget(
+        Some(layout) => {
+            let tree_node = split_tree::build_split_node_from_layout(
                 state,
                 shortcuts,
                 ws_id,
                 working_directory,
-                &split_state.start,
+                layout,
             );
-            let end =
-                build_layout_widget(state, shortcuts, ws_id, working_directory, &split_state.end);
-            paned.set_start_child(Some(&start));
-            paned.set_end_child(Some(&end));
-            apply_split_ratio_after_layout(&paned, orientation, split_state.ratio);
-            paned.upcast()
+            let container = SplitTreeContainer::new_from_tree(state, tree_node);
+            let root = container.widget().clone().upcast::<gtk::Widget>();
+            (root, container)
+        }
+        None => {
+            let pane =
+                create_pane_for_workspace(state, shortcuts, ws_id, working_directory, None);
+            let container = SplitTreeContainer::new(state, pane.clone().upcast());
+            let root = container.widget().clone().upcast::<gtk::Widget>();
+            (root, container)
         }
     }
 }
 
-fn apply_split_ratio_after_layout(paned: &gtk::Paned, orientation: gtk::Orientation, ratio: f64) {
+pub(crate) fn apply_split_ratio_after_layout(
+    paned: &gtk::Paned,
+    orientation: gtk::Orientation,
+    ratio: f64,
+) {
     let ratio = layout_state::clamp_split_ratio(ratio);
     let apply_ratio = move |paned: &gtk::Paned| {
         let allocation = paned.allocation();
@@ -458,7 +403,7 @@ fn apply_split_ratio_after_layout(paned: &gtk::Paned, orientation: gtk::Orientat
     });
 }
 
-fn attach_split_position_persistence(state: &State, paned: &gtk::Paned) {
+pub(crate) fn attach_split_position_persistence(state: &State, paned: &gtk::Paned) {
     update_split_ratio_state(paned, layout_state::DEFAULT_SPLIT_RATIO);
     let state = state.clone();
     paned.connect_position_notify(move |paned| {
@@ -2399,7 +2344,8 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         .folder_path
         .as_deref()
         .or(workspace.cwd.as_deref());
-    let root = build_workspace_root(state, &shortcuts, &id, working_dir, Some(&workspace.layout));
+    let (root, split_container) =
+        build_workspace_root(state, &shortcuts, &id, working_dir, Some(&workspace.layout));
     stack.add_named(&root, Some(&stack_name));
 
     let (row, name_label, favorite_button, notify_dot, notify_label, path_label) =
@@ -2412,6 +2358,7 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         id,
         name: workspace.name.clone(),
         root,
+        split_container,
         sidebar_row: row.clone(),
         name_label,
         favorite_button,
@@ -2439,7 +2386,7 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
 }
 
 /// Create a PaneWidget wired up with callbacks for a specific workspace.
-fn create_pane_for_workspace(
+pub(crate) fn create_pane_for_workspace(
     state: &State,
     shortcuts: &Rc<ResolvedShortcutConfig>,
     ws_id: &str,
@@ -2672,10 +2619,29 @@ fn focus_workspace_entrypoint(root: &gtk::Widget) {
 }
 
 fn first_leaf_pane(widget: &gtk::Widget) -> gtk::Widget {
+    if pane::is_pane_widget(widget) {
+        return widget.clone();
+    }
+
     if let Some(paned) = widget.downcast_ref::<gtk::Paned>() {
         if let Some(child) = paned.start_child().or_else(|| paned.end_child()) {
             return first_leaf_pane(&child);
         }
+    }
+
+    if let Some(stack) = widget.downcast_ref::<gtk::Stack>() {
+        if let Some(visible) = stack.visible_child() {
+            return first_leaf_pane(&visible);
+        }
+    }
+
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        let candidate = first_leaf_pane(&current);
+        if pane::is_pane_widget(&candidate) {
+            return candidate;
+        }
+        child = current.next_sibling();
     }
 
     widget.clone()
@@ -2835,8 +2801,7 @@ fn split_pane(
     orientation: gtk::Orientation,
     initial_state: Option<PaneState>,
 ) -> gtk::Widget {
-    // Use the workspace's folder_path (or current cwd) for the new pane
-    let (shortcuts, wd) = {
+    let (shortcuts, wd, container) = {
         let s = state.borrow();
         (
             s.shortcuts.clone(),
@@ -2844,8 +2809,16 @@ fn split_pane(
                 .iter()
                 .find(|w| w.id == ws_id)
                 .and_then(|ws| ws.folder_path.clone().or_else(|| ws.cwd.borrow().clone())),
+            s.workspaces
+                .iter()
+                .find(|w| w.id == ws_id)
+                .map(|ws| ws.split_container.clone()),
         )
     };
+    let Some(container) = container else {
+        return pane_widget.clone();
+    };
+
     let new_pane = create_pane_for_workspace(
         state,
         &shortcuts,
@@ -2854,128 +2827,40 @@ fn split_pane(
         initial_state.as_ref(),
     );
 
-    let parent = pane_widget.parent();
+    // Mutate the data model and trigger async widget tree rebuild.
+    // The existing pane's GLArea will be unrealized then re-realized
+    // on separate ticks, avoiding the GTK4 GLArea breakage.
+    container.split(
+        pane_widget,
+        new_pane.clone().upcast(),
+        orientation,
+        false,
+        layout_state::DEFAULT_SPLIT_RATIO,
+    );
 
-    let new_paned = gtk::Paned::builder()
-        .orientation(orientation)
-        .hexpand(true)
-        .vexpand(true)
-        .build();
-    update_split_ratio_state(&new_paned, layout_state::DEFAULT_SPLIT_RATIO);
-    attach_split_position_persistence(state, &new_paned);
-
-    if let Some(parent) = parent {
-        if let Some(paned_parent) = parent.downcast_ref::<gtk::Paned>() {
-            let is_start = paned_parent
-                .start_child()
-                .map(|c| c == *pane_widget)
-                .unwrap_or(false);
-            if is_start {
-                paned_parent.set_start_child(Some(&new_paned));
-            } else {
-                paned_parent.set_end_child(Some(&new_paned));
-            }
-        } else if let Some(stack) = parent.downcast_ref::<gtk::Stack>() {
-            let page_name = format!("ws-{ws_id}");
-            stack.remove(pane_widget);
-            stack.add_named(&new_paned, Some(&page_name));
-            stack.set_visible_child_name(&page_name);
-            // Update root reference
-            let mut s = state.borrow_mut();
-            if let Some(ws) = s.workspaces.iter_mut().find(|w| w.id == ws_id) {
-                ws.root = new_paned.clone().upcast();
-            }
-        }
-    }
-
-    new_paned.set_start_child(Some(pane_widget));
-    new_paned.set_end_child(Some(&new_pane));
-
-    // 50% split after layout
-    {
-        let np = new_paned.clone();
-        glib::idle_add_local_once(move || {
-            let alloc = np.allocation();
-            let size = if orientation == gtk::Orientation::Horizontal {
-                alloc.width()
-            } else {
-                alloc.height()
-            };
-            if size > 0 {
-                np.set_position(size / 2);
-            }
-        });
-    }
     request_session_save(state);
     new_pane.upcast()
 }
 
 fn remove_pane(state: &State, ws_id: &str, pane_widget: &gtk::Widget) {
-    let parent = pane_widget.parent();
-
-    let Some(parent) = parent else {
-        return;
+    let container = {
+        let s = state.borrow();
+        s.workspaces
+            .iter()
+            .find(|w| w.id == ws_id)
+            .map(|ws| ws.split_container.clone())
     };
 
-    if let Some(paned) = parent.downcast_ref::<gtk::Paned>() {
-        // Find sibling
-        let sibling = if paned
-            .start_child()
-            .map(|c| c == *pane_widget)
-            .unwrap_or(false)
-        {
-            paned.end_child()
-        } else {
-            paned.start_child()
-        };
+    let Some(container) = container else { return };
 
-        if let Some(sibling) = sibling {
-            // Move focus to the sibling's GLArea before detaching to avoid
-            // GTK focus tracking warnings on ancestor Paneds.
-            if let Some(gl) = find_gl_area(&sibling) {
-                gl.grab_focus();
-            }
-
-            // Walk up and clear focus_child on all ancestor Paneds
-            let mut ancestor = paned.parent();
-            while let Some(a) = ancestor {
-                if let Some(ap) = a.downcast_ref::<gtk::Paned>() {
-                    ap.set_focus_child(gtk::Widget::NONE);
-                }
-                ancestor = a.parent();
-            }
-            paned.set_focus_child(gtk::Widget::NONE);
-            paned.set_start_child(gtk::Widget::NONE);
-            paned.set_end_child(gtk::Widget::NONE);
-
-            if let Some(grandparent) = paned.parent() {
-                if let Some(gp_paned) = grandparent.downcast_ref::<gtk::Paned>() {
-                    let is_start = gp_paned
-                        .start_child()
-                        .map(|c| c == paned.clone().upcast::<gtk::Widget>())
-                        .unwrap_or(false);
-                    if is_start {
-                        gp_paned.set_start_child(Some(&sibling));
-                    } else {
-                        gp_paned.set_end_child(Some(&sibling));
-                    }
-                } else if let Some(stack) = grandparent.downcast_ref::<gtk::Stack>() {
-                    let page_name = format!("ws-{ws_id}");
-                    stack.remove(paned);
-                    stack.add_named(&sibling, Some(&page_name));
-                    stack.set_visible_child_name(&page_name);
-                    let mut s = state.borrow_mut();
-                    if let Some(ws) = s.workspaces.iter_mut().find(|w| w.id == ws_id) {
-                        ws.root = sibling.clone();
-                    }
-                }
-            }
-        }
-    } else if parent.downcast_ref::<gtk::Stack>().is_some() {
-        // This is the only pane in the workspace — close the workspace
+    // If this is the only pane, close the entire workspace
+    if container.is_single_pane() {
         close_workspace_by_id(state, ws_id);
         return;
     }
+
+    // Mutate the data model and trigger async widget tree rebuild
+    container.remove(pane_widget);
     request_session_save(state);
 }
 
@@ -3021,7 +2906,7 @@ fn find_focused_pane(state: &State) -> Option<(String, gtk::Widget)> {
         (ws.id.clone(), ws.root.clone())
     };
 
-    Some((ws_id, root))
+    Some((ws_id, first_leaf_pane(&root)))
 }
 
 fn focused_shortcut_target(state: &State) -> pane::FocusedShortcutTarget {
@@ -3224,7 +3109,7 @@ fn focus_pane_in_direction(state: &State, direction: Direction) {
 
 /// Recursively find the first visible GLArea inside a widget tree.
 /// For gtk::Stack containers, only descend into the visible child.
-fn find_gl_area(widget: &gtk::Widget) -> Option<gtk::GLArea> {
+pub(crate) fn find_gl_area(widget: &gtk::Widget) -> Option<gtk::GLArea> {
     if let Some(gl) = widget.downcast_ref::<gtk::GLArea>() {
         return Some(gl.clone());
     }
@@ -3250,6 +3135,10 @@ fn find_gl_area(widget: &gtk::Widget) -> Option<gtk::GLArea> {
 /// `prefer_start` is true (to find the nearest edge). For Paned widgets on
 /// the other axis, prefer start_child (arbitrary but consistent).
 fn find_leaf_pane(widget: &gtk::Widget, axis: gtk::Orientation, prefer_start: bool) -> gtk::Widget {
+    if pane::is_pane_widget(widget) {
+        return widget.clone();
+    }
+
     if let Some(paned) = widget.downcast_ref::<gtk::Paned>() {
         let pick_start = if paned.orientation() == axis {
             prefer_start
@@ -3261,14 +3150,28 @@ fn find_leaf_pane(widget: &gtk::Widget, axis: gtk::Orientation, prefer_start: bo
         } else {
             paned.end_child()
         };
-        match child {
+        return match child {
             Some(c) => find_leaf_pane(&c, axis, prefer_start),
             None => widget.clone(),
-        }
-    } else {
-        // Leaf pane — this is a pane gtk::Box
-        widget.clone()
+        };
     }
+
+    if let Some(stack) = widget.downcast_ref::<gtk::Stack>() {
+        if let Some(visible) = stack.visible_child() {
+            return find_leaf_pane(&visible, axis, prefer_start);
+        }
+    }
+
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        let candidate = find_leaf_pane(&current, axis, prefer_start);
+        if pane::is_pane_widget(&candidate) {
+            return candidate;
+        }
+        child = current.next_sibling();
+    }
+
+    widget.clone()
 }
 
 fn mark_workspace_unread(state: &State, ws_id: &str) {
