@@ -162,7 +162,10 @@ fn main() {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn temp_path(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -237,6 +240,7 @@ mod tests {
 
     #[test]
     fn replaces_invalid_inherited_runtime_env_with_resolved_paths() {
+        let _lock = ENV_TEST_LOCK.lock().expect("env test lock");
         let root = temp_path("env-override");
         let exe_dir = root.join("target/release");
         let resources_dir = root.join("ghostty/zig-out/share/ghostty");
@@ -295,6 +299,7 @@ mod tests {
 
     #[test]
     fn preserves_valid_existing_runtime_env_paths() {
+        let _lock = ENV_TEST_LOCK.lock().expect("env test lock");
         let root = temp_path("env-preserve");
         let exe_dir = root.join("target/release");
         let resources_dir = root.join("ghostty/zig-out/share/ghostty");
