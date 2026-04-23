@@ -1,13 +1,14 @@
 //! Bridge the limux control socket onto the GTK host state.
 
 use std::io::{self, BufRead, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
 use std::time::Duration;
 
 use gtk::glib;
 use gtk4 as gtk;
-use limux_control::socket_path::{resolve_socket_path, SocketMode};
+use limux_control::auth::{authorize_peer, SocketControlMode};
+use limux_control::socket_path::{bind_listener, resolve_socket_path, SocketMode};
 use limux_protocol::{parse_v1_command_envelope, V2Request, V2Response};
 use serde_json::{json, Map, Value};
 
@@ -386,15 +387,13 @@ pub fn start(dispatch: fn(ControlCommand)) {
     std::thread::Builder::new()
         .name("limux-control".into())
         .spawn(move || {
+            let control_mode = SocketControlMode::from_env();
             let path = resolve_socket_path(None, SocketMode::Runtime);
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if path.exists() {
-                let _ = std::fs::remove_file(&path);
-            }
-
-            let listener = match UnixListener::bind(&path) {
+            let listener = match bind_listener(
+                &path,
+                SocketMode::Runtime,
+                control_mode.requires_owner_only_socket(),
+            ) {
                 Ok(listener) => listener,
                 Err(error) => {
                     eprintln!(
@@ -410,12 +409,22 @@ pub fn start(dispatch: fn(ControlCommand)) {
             for stream in listener.incoming() {
                 match stream {
                     Ok(stream) => {
+                        let peer = match authorize_peer(&stream, control_mode) {
+                            Ok(peer) => peer,
+                            Err(error) => {
+                                eprintln!("limux: rejected control client: {error}");
+                                continue;
+                            }
+                        };
                         let dispatch = dispatch.clone();
                         std::thread::Builder::new()
                             .name("limux-ctrl-conn".into())
                             .spawn(move || {
                                 if let Err(error) = handle_client(stream, dispatch.as_ref()) {
-                                    eprintln!("limux: control connection error: {error}");
+                                    eprintln!(
+                                        "limux: control connection error for pid={} uid={}: {error}",
+                                        peer.pid, peer.uid
+                                    );
                                 }
                             })
                             .ok();
