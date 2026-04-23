@@ -32,6 +32,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            blueprint-compiler \
             build-essential \
             libadwaita-1-dev \
             libepoxy-dev \
@@ -42,7 +43,7 @@ jobs:
       - name: Build libghostty for embedding
         run: |
           cd ghostty
-          zig build -Dapp-runtime=none -Doptimize=ReleaseFast
+          zig build -Dapp-runtime=none -Doptimize=ReleaseFast -Dcpu=baseline
 
       - name: Run repository quality checks
         run: ./scripts/check.sh

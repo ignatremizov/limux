@@ -23,13 +23,13 @@ Download the latest release from [GitHub Releases](https://github.com/am-will/li
 
 **Debian/Ubuntu (.deb)** — recommended:
 ```bash
-sudo dpkg -i ./limux_0.1.12_amd64.deb
+sudo dpkg -i ./limux_0.1.13_amd64.deb
 ```
 
 **AppImage** — portable, no install needed:
 ```bash
-chmod +x Limux-0.1.12-x86_64.AppImage
-./Limux-0.1.12-x86_64.AppImage
+chmod +x Limux-0.1.13-x86_64.AppImage
+./Limux-0.1.13-x86_64.AppImage
 ```
 
 **Tarball** — manual install:
@@ -93,7 +93,7 @@ LD_LIBRARY_PATH=../ghostty/zig-out/lib:$LD_LIBRARY_PATH ./target/release/limux
 ```
 
 This builds the binary, bundles `libghostty.so`, icons, and an install script into a tarball.
-`package.sh` also rebuilds `libghostty.so` with `ReleaseFast`, so Zig and the initialized Ghostty submodule must be present.
+`package.sh` also rebuilds `libghostty.so` with `ReleaseFast` and `-Dcpu=baseline`, so Zig and the initialized Ghostty submodule must be present.
 
 ## Development
 

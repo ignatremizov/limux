@@ -461,37 +461,56 @@ fn build_workspace_root(
     (root, container)
 }
 
-pub(crate) fn apply_split_ratio_after_layout(
+fn apply_ratio_value(
     paned: &gtk::Paned,
     orientation: gtk::Orientation,
     ratio: f64,
-) {
+    applying: &Rc<Cell<bool>>,
+) -> bool {
     let ratio = layout_state::clamp_split_ratio(ratio);
-    let apply_ratio = move |paned: &gtk::Paned| {
-        let allocation = paned.allocation();
-        let size = if orientation == gtk::Orientation::Horizontal {
-            allocation.width()
-        } else {
-            allocation.height()
-        };
-        if size <= 0 {
-            return false;
-        }
-        paned.set_position(layout_state::split_position_from_ratio(ratio, size));
-        update_split_ratio_state(paned, ratio);
-        true
+    let allocation = paned.allocation();
+    let size = if orientation == gtk::Orientation::Horizontal {
+        allocation.width()
+    } else {
+        allocation.height()
     };
+    if size <= 0 {
+        return false;
+    }
+    applying.set(true);
+    paned.set_position(layout_state::split_position_from_ratio(ratio, size));
+    update_split_ratio_state(paned, ratio);
+    applying.set(false);
+    true
+}
+
+pub(crate) fn apply_split_ratio_after_layout(
+    paned: &gtk::Paned,
+    orientation: gtk::Orientation,
+    ratio_cell: Rc<RefCell<f64>>,
+    applying: Rc<Cell<bool>>,
+) {
+    // Capture the ratio by value for the initial idle callback so that early
+    // position_notify events (which may corrupt the cell) don't affect it.
+    let initial_ratio = *ratio_cell.borrow();
 
     let paned_for_idle = paned.clone();
+    let applying_for_idle = applying.clone();
     glib::idle_add_local_once(move || {
-        let _ = apply_ratio(&paned_for_idle);
+        apply_ratio_value(
+            &paned_for_idle,
+            orientation,
+            initial_ratio,
+            &applying_for_idle,
+        );
     });
 
     let paned_for_map = paned.clone();
-    // Hidden workspaces may not have a real allocation during initial restore, so retry when the
-    // split is actually mapped instead of collapsing the divider to an arbitrary fallback pixel.
+    // Re-apply the current data model ratio on every map event (workspace switches).
+    // Reads from the cell so drag-adjusted ratios are restored correctly.
     paned.connect_map(move |_| {
-        let _ = apply_ratio(&paned_for_map);
+        let ratio = *ratio_cell.borrow();
+        apply_ratio_value(&paned_for_map, orientation, ratio, &applying);
     });
 }
 
@@ -525,25 +544,41 @@ const WORKSPACE_RENAME_ENTRY_CSS_CLASSES: [&str; 2] =
     [HOST_ENTRY_CSS_CLASS, WORKSPACE_RENAME_ENTRY_CSS_CLASS];
 
 const BASE_CSS: &str = r#"
+:root {
+    --limux-host-entry-bg: rgba(255, 255, 255, 0.98);
+    --limux-host-entry-fg: rgba(15, 23, 42, 0.96);
+    --limux-host-entry-border: rgba(15, 23, 42, 0.16);
+    --limux-host-entry-border-focus: rgba(0, 145, 255, 0.72);
+    --limux-host-entry-placeholder: rgba(15, 23, 42, 0.5);
+}
+@media (prefers-color-scheme: dark) {
+    :root {
+        --limux-host-entry-bg: rgba(44, 44, 48, 0.98);
+        --limux-host-entry-fg: rgba(255, 255, 255, 0.96);
+        --limux-host-entry-border: rgba(255, 255, 255, 0.14);
+        --limux-host-entry-border-focus: rgba(0, 145, 255, 0.78);
+        --limux-host-entry-placeholder: rgba(255, 255, 255, 0.48);
+    }
+}
 .limux-host-entry {
-    background-color: alpha(@window_fg_color, 0.06);
-    color: @window_fg_color;
-    border: 1px solid alpha(@window_fg_color, 0.16);
+    background-color: var(--limux-host-entry-bg);
+    color: var(--limux-host-entry-fg);
+    border: 1px solid var(--limux-host-entry-border);
     border-radius: 6px;
     caret-color: currentColor;
 }
 .limux-host-entry:focus-within {
-    border-color: alpha(@accent_bg_color, 0.72);
+    border-color: var(--limux-host-entry-border-focus);
 }
 .limux-host-entry text {
     background-color: transparent;
-    color: @window_fg_color;
+    color: var(--limux-host-entry-fg);
 }
 .limux-host-entry text placeholder {
-    color: alpha(@window_fg_color, 0.5);
+    color: var(--limux-host-entry-placeholder);
 }
 .limux-host-entry image {
-    color: alpha(@window_fg_color, 0.5);
+    color: var(--limux-host-entry-placeholder);
 }
 .limux-sidebar {
     background-color: @window_bg_color;
@@ -3740,15 +3775,66 @@ fn dispatch_terminal_command(state: &State, command: ShortcutCommand) -> bool {
         ShortcutCommand::TerminalClearScrollback => target.perform_binding_action("clear_screen"),
         ShortcutCommand::TerminalCopy => target.perform_binding_action("copy_to_clipboard"),
         ShortcutCommand::TerminalPaste => target.perform_binding_action("paste_from_clipboard"),
-        ShortcutCommand::TerminalIncreaseFontSize => {
-            target.perform_binding_action("increase_font_size:1")
-        }
-        ShortcutCommand::TerminalDecreaseFontSize => {
-            target.perform_binding_action("decrease_font_size:1")
-        }
-        ShortcutCommand::TerminalResetFontSize => target.perform_binding_action("reset_font_size"),
+        ShortcutCommand::TerminalIncreaseFontSize => persist_font_size_delta(state, 1.0),
+        ShortcutCommand::TerminalDecreaseFontSize => persist_font_size_delta(state, -1.0),
+        ShortcutCommand::TerminalResetFontSize => persist_font_size_reset(state),
         _ => false,
     }
+}
+
+fn persist_font_size_delta(state: &State, delta: f32) -> bool {
+    let current = {
+        let s = state.borrow();
+        let current = s.config.borrow().font_size;
+        current
+    };
+    let new_size = font_size_after_delta(current, crate::terminal::default_font_size(), delta);
+
+    if let Err(err) = persist_font_size(state, Some(new_size)) {
+        show_font_size_save_error(state, err);
+        return false;
+    }
+
+    broadcast_font_size(new_size);
+    true
+}
+
+fn persist_font_size_reset(state: &State) -> bool {
+    if let Err(err) = persist_font_size(state, None) {
+        show_font_size_save_error(state, err);
+        return false;
+    }
+
+    crate::terminal::broadcast_binding_action("reset_font_size");
+    true
+}
+
+fn persist_font_size(state: &State, font_size: Option<f32>) -> Result<(), String> {
+    let mut updated = {
+        let s = state.borrow();
+        let updated = s.config.borrow().clone();
+        updated
+    };
+    updated.font_size = font_size;
+    app_config::save(&updated)?;
+
+    state.borrow().config.borrow_mut().font_size = font_size;
+    Ok(())
+}
+
+fn font_size_after_delta(current: Option<f32>, default: f32, delta: f32) -> f32 {
+    (current.unwrap_or(default) + delta).clamp(1.0, 255.0)
+}
+
+fn show_font_size_save_error(state: &State, err: String) {
+    let detail = format!("Failed to save Limux settings: {err}");
+    eprintln!("limux: {detail}");
+    show_runtime_error(state, "Failed to save settings", &detail);
+}
+
+fn broadcast_font_size(size: f32) {
+    let action = format!("set_font_size:{size}");
+    crate::terminal::broadcast_binding_action(&action);
 }
 
 fn dispatch_browser_command(state: &State, command: ShortcutCommand) -> bool {
@@ -3838,11 +3924,28 @@ fn add_tab_to_focused_pane(_state: &State, _browser: bool) {
 }
 
 /// Direction for pane navigation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Direction {
     Left,
     Right,
     Up,
     Down,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PaneBounds {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NeighborScore {
+    has_overlap: bool,
+    overlap: i32,
+    gap: i32,
+    center_delta: i32,
 }
 
 /// Focus the neighboring pane in the given direction by walking the gtk::Paned tree.
@@ -3851,6 +3954,7 @@ fn focus_pane_in_direction(state: &State, direction: Direction) {
         Some(v) => v,
         None => return,
     };
+    let root = state.borrow().window.clone().upcast::<gtk::Widget>();
 
     // Determine which axis and sides we care about.
     let (target_orientation, must_be_start) = match direction {
@@ -3862,7 +3966,7 @@ fn focus_pane_in_direction(state: &State, direction: Direction) {
 
     // Walk up from the focused pane to find a gtk::Paned with the right
     // orientation where the current subtree is on the correct side.
-    let mut current: gtk::Widget = pane_widget;
+    let mut current: gtk::Widget = pane_widget.clone();
     loop {
         let parent = match current.parent() {
             Some(p) => p,
@@ -3879,10 +3983,14 @@ fn focus_pane_in_direction(state: &State, direction: Direction) {
                         paned.start_child()
                     };
                     if let Some(sibling) = sibling {
-                        // Descend into the sibling to find the nearest leaf pane.
-                        // "Nearest" means the edge closest to where we came from.
-                        let prefer_start = !must_be_start;
-                        let leaf = find_leaf_pane(&sibling, target_orientation, prefer_start);
+                        let leaf =
+                            best_directional_leaf_pane(&pane_widget, &sibling, &root, direction)
+                                .unwrap_or_else(|| {
+                                    // Fall back to the old edge-based heuristic if bounds
+                                    // are unavailable for some reason.
+                                    let prefer_start = !must_be_start;
+                                    find_leaf_pane(&sibling, target_orientation, prefer_start)
+                                });
                         // Find the GLArea inside the pane and focus it directly
                         if let Some(gl) = find_gl_area(&leaf) {
                             gl.grab_focus();
@@ -3894,6 +4002,146 @@ fn focus_pane_in_direction(state: &State, direction: Direction) {
         }
         current = parent;
     }
+}
+
+fn widget_bounds_in_root(widget: &gtk::Widget, root: &gtk::Widget) -> Option<PaneBounds> {
+    let allocation = widget.allocation();
+    let width = allocation.width();
+    let height = allocation.height();
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+
+    let (left, top) = widget.translate_coordinates(root, 0.0, 0.0)?;
+    Some(PaneBounds {
+        left,
+        top,
+        right: left + f64::from(width),
+        bottom: top + f64::from(height),
+    })
+}
+
+fn overlap_1d(a_start: f64, a_end: f64, b_start: f64, b_end: f64) -> i32 {
+    (a_end.min(b_end) - a_start.max(b_start)).max(0.0).round() as i32
+}
+
+fn directional_neighbor_score(
+    current: PaneBounds,
+    candidate: PaneBounds,
+    direction: Direction,
+) -> Option<NeighborScore> {
+    let (gap, overlap, current_center, candidate_center) = match direction {
+        Direction::Left => (
+            current.left - candidate.right,
+            overlap_1d(current.top, current.bottom, candidate.top, candidate.bottom),
+            (current.top + current.bottom) / 2.0,
+            (candidate.top + candidate.bottom) / 2.0,
+        ),
+        Direction::Right => (
+            candidate.left - current.right,
+            overlap_1d(current.top, current.bottom, candidate.top, candidate.bottom),
+            (current.top + current.bottom) / 2.0,
+            (candidate.top + candidate.bottom) / 2.0,
+        ),
+        Direction::Up => (
+            current.top - candidate.bottom,
+            overlap_1d(current.left, current.right, candidate.left, candidate.right),
+            (current.left + current.right) / 2.0,
+            (candidate.left + candidate.right) / 2.0,
+        ),
+        Direction::Down => (
+            candidate.top - current.bottom,
+            overlap_1d(current.left, current.right, candidate.left, candidate.right),
+            (current.left + current.right) / 2.0,
+            (candidate.left + candidate.right) / 2.0,
+        ),
+    };
+
+    if gap < -0.5 {
+        return None;
+    }
+
+    Some(NeighborScore {
+        has_overlap: overlap > 0,
+        overlap,
+        gap: gap.max(0.0).round() as i32,
+        center_delta: (candidate_center - current_center).abs().round() as i32,
+    })
+}
+
+fn neighbor_score_better(candidate: NeighborScore, best: NeighborScore) -> bool {
+    (
+        candidate.has_overlap,
+        candidate.overlap,
+        -candidate.gap,
+        -candidate.center_delta,
+    ) > (
+        best.has_overlap,
+        best.overlap,
+        -best.gap,
+        -best.center_delta,
+    )
+}
+
+fn collect_leaf_panes(widget: &gtk::Widget, panes: &mut Vec<gtk::Widget>) {
+    if pane::is_pane_widget(widget) {
+        panes.push(widget.clone());
+        return;
+    }
+
+    if let Some(paned) = widget.downcast_ref::<gtk::Paned>() {
+        if let Some(child) = paned.start_child() {
+            collect_leaf_panes(&child, panes);
+        }
+        if let Some(child) = paned.end_child() {
+            collect_leaf_panes(&child, panes);
+        }
+        return;
+    }
+
+    if let Some(stack) = widget.downcast_ref::<gtk::Stack>() {
+        if let Some(visible) = stack.visible_child() {
+            collect_leaf_panes(&visible, panes);
+        }
+        return;
+    }
+
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        collect_leaf_panes(&current, panes);
+        child = current.next_sibling();
+    }
+}
+
+fn best_directional_leaf_pane(
+    current_pane: &gtk::Widget,
+    sibling_subtree: &gtk::Widget,
+    root: &gtk::Widget,
+    direction: Direction,
+) -> Option<gtk::Widget> {
+    let current_bounds = widget_bounds_in_root(current_pane, root)?;
+    let mut leaves = Vec::new();
+    collect_leaf_panes(sibling_subtree, &mut leaves);
+
+    let mut best: Option<(gtk::Widget, NeighborScore)> = None;
+    for leaf in leaves {
+        let Some(bounds) = widget_bounds_in_root(&leaf, root) else {
+            continue;
+        };
+        let Some(score) = directional_neighbor_score(current_bounds, bounds, direction) else {
+            continue;
+        };
+
+        let should_replace = best
+            .as_ref()
+            .map(|(_, best_score)| neighbor_score_better(score, *best_score))
+            .unwrap_or(true);
+        if should_replace {
+            best = Some((leaf, score));
+        }
+    }
+
+    best.map(|(leaf, _)| leaf)
 }
 
 /// Recursively find the first visible GLArea inside a widget tree.
@@ -3994,15 +4242,16 @@ mod tests {
     use super::gtk::ffi;
     use super::gtk::gdk;
     use super::{
-        build_window_css, clamp_workspace_insert_index_for_pinning, favorites_prefix_len,
-        ghostty_prefers_dark, gtk_system_prefers_dark_from_raw, next_active_workspace_index,
-        queue_session_save_request, resolved_system_prefers_dark, sanitize_background_opacity,
+        build_window_css, clamp_workspace_insert_index_for_pinning, directional_neighbor_score,
+        favorites_prefix_len, font_size_after_delta, ghostty_prefers_dark,
+        gtk_system_prefers_dark_from_raw, next_active_workspace_index, queue_session_save_request,
+        resolved_system_prefers_dark, sanitize_background_opacity,
         shortcut_allowed_while_browser_find_active, shortcut_blocked_by_editable,
         shortcut_command_from_key_event, shortcut_dispatch_propagation, tab_drag_workspace_seed,
         use_opaque_window_background, workspace_drop_layout_path, workspace_notification_message,
-        EditableCaptureContext, PortalColorSchemePreference, SessionSaveAccess, SessionSaveRequest,
-        WorkspaceSeedSource, BASE_CSS, HOST_ENTRY_CSS_CLASS, WORKSPACE_RENAME_ENTRY_CSS_CLASS,
-        WORKSPACE_RENAME_ENTRY_CSS_CLASSES,
+        Direction, EditableCaptureContext, NeighborScore, PaneBounds, PortalColorSchemePreference,
+        SessionSaveAccess, SessionSaveRequest, WorkspaceSeedSource, BASE_CSS, HOST_ENTRY_CSS_CLASS,
+        WORKSPACE_RENAME_ENTRY_CSS_CLASS, WORKSPACE_RENAME_ENTRY_CSS_CLASSES,
     };
     use crate::layout_state::{LayoutNodeState, PaneState, SplitOrientation, SplitState};
     use crate::shortcut_config::{
@@ -4051,6 +4300,83 @@ mod tests {
     }
 
     #[test]
+    fn directional_neighbor_score_prefers_row_overlap_when_moving_left() {
+        let current = PaneBounds {
+            left: 100.0,
+            top: 100.0,
+            right: 200.0,
+            bottom: 200.0,
+        };
+        let top_left = PaneBounds {
+            left: 0.0,
+            top: 0.0,
+            right: 100.0,
+            bottom: 100.0,
+        };
+        let bottom_left = PaneBounds {
+            left: 0.0,
+            top: 100.0,
+            right: 100.0,
+            bottom: 200.0,
+        };
+
+        let top_score =
+            directional_neighbor_score(current, top_left, Direction::Left).expect("top score");
+        let bottom_score = directional_neighbor_score(current, bottom_left, Direction::Left)
+            .expect("bottom score");
+
+        assert_eq!(
+            top_score,
+            NeighborScore {
+                has_overlap: false,
+                overlap: 0,
+                gap: 0,
+                center_delta: 100,
+            }
+        );
+        assert_eq!(
+            bottom_score,
+            NeighborScore {
+                has_overlap: true,
+                overlap: 100,
+                gap: 0,
+                center_delta: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn directional_neighbor_score_prefers_column_overlap_when_moving_up() {
+        let current = PaneBounds {
+            left: 100.0,
+            top: 100.0,
+            right: 200.0,
+            bottom: 200.0,
+        };
+        let top_left = PaneBounds {
+            left: 0.0,
+            top: 0.0,
+            right: 100.0,
+            bottom: 100.0,
+        };
+        let top_right = PaneBounds {
+            left: 100.0,
+            top: 0.0,
+            right: 200.0,
+            bottom: 100.0,
+        };
+
+        let left_score =
+            directional_neighbor_score(current, top_left, Direction::Up).expect("left score");
+        let right_score =
+            directional_neighbor_score(current, top_right, Direction::Up).expect("right score");
+
+        assert_eq!(left_score.overlap, 0);
+        assert_eq!(right_score.overlap, 100);
+        assert!(right_score.has_overlap);
+    }
+
+    #[test]
     fn build_window_css_uses_resolved_background_opacity() {
         let css = build_window_css(0.42);
         assert!(css.contains(".limux-host-entry"));
@@ -4061,12 +4387,23 @@ mod tests {
     }
 
     #[test]
+    fn font_size_after_delta_uses_default_when_unset() {
+        assert_eq!(font_size_after_delta(None, 12.0, 1.0), 13.0);
+    }
+
+    #[test]
+    fn font_size_after_delta_clamps_to_supported_range() {
+        assert_eq!(font_size_after_delta(Some(1.0), 12.0, -5.0), 1.0);
+        assert_eq!(font_size_after_delta(Some(255.0), 12.0, 5.0), 255.0);
+    }
+
+    #[test]
     fn base_css_defines_theme_aware_host_entry_styles() {
+        assert!(BASE_CSS.contains(":root"));
+        assert!(BASE_CSS.contains("@media (prefers-color-scheme: dark)"));
         assert!(BASE_CSS.contains(".limux-host-entry"));
         assert!(BASE_CSS.contains(".limux-host-entry text"));
         assert!(BASE_CSS.contains(".limux-host-entry text placeholder"));
-        assert!(BASE_CSS.contains("@window_fg_color"));
-        assert!(BASE_CSS.contains("@accent_bg_color"));
         assert!(BASE_CSS.contains("caret-color: currentColor;"));
     }
 

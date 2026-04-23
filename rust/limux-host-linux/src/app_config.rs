@@ -36,12 +36,14 @@ impl ColorScheme {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub focus: FocusConfig,
     #[serde(skip)]
     pub appearance: AppearanceConfig,
+    #[serde(skip)]
+    pub font_size: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -56,7 +58,7 @@ pub struct FocusConfig {
     pub hover_terminal_focus: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LoadedAppConfig {
     pub config: AppConfig,
     pub warnings: Vec<String>,
@@ -147,6 +149,12 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
         .and_then(ColorScheme::from_str)
         .unwrap_or(color_scheme);
 
+    let font_size = root
+        .get("font_size")
+        .and_then(Value::as_f64)
+        .map(|v| v as f32)
+        .filter(|v| (1.0..=255.0).contains(v));
+
     AppConfig {
         focus: FocusConfig {
             hover_terminal_focus,
@@ -155,6 +163,7 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
             color_scheme,
             ghostty_color_scheme,
         },
+        font_size,
     }
 }
 
@@ -181,6 +190,12 @@ fn save_to_path(path: &Path, config: &AppConfig) -> Result<(), String> {
         "focus".to_string(),
         json!({ "hover_terminal_focus": config.focus.hover_terminal_focus }),
     );
+
+    if let Some(size) = config.font_size {
+        root.insert("font_size".to_string(), json!(size));
+    } else {
+        root.remove("font_size");
+    }
 
     let serialized =
         serde_json::to_string_pretty(&Value::Object(root)).expect("config should serialize");
@@ -337,14 +352,26 @@ mod tests {
     }
 
     #[test]
-    fn ensure_default_config_file_writes_opt_in_false_setting() {
+    fn settings_path_in_uses_limux_settings_json() {
+        let path = settings_path_in(Path::new("/tmp/example"));
+
+        assert_eq!(path, Path::new("/tmp/example/limux/settings.json"));
+    }
+
+    #[test]
+    fn ensure_default_config_file_writes_dark_appearance_and_opt_in_false_setting() {
         let dir = TempDir::new().expect("temp dir");
         let path = settings_path_in(dir.path());
 
-        ensure_default_config_file(&path).expect("default config file");
+        ensure_default_config_file(&path).expect("write default config");
+
         let raw = fs::read_to_string(&path).expect("read config");
         let parsed: Value = serde_json::from_str(&raw).expect("parse config");
         assert_eq!(parsed["focus"]["hover_terminal_focus"], Value::Bool(false));
+        assert_eq!(
+            parsed["appearance"]["color_scheme"],
+            Value::String("dark".to_string())
+        );
         assert_eq!(
             parsed["appearance"]["ghostty_color_scheme"],
             Value::String("dark".to_string())
@@ -361,9 +388,6 @@ mod tests {
             r#"{
   "focus": {
     "hover_terminal_focus": true
-  },
-  "shortcuts": {
-    "new_terminal": "<Ctrl><Alt>T"
   }
 }
 "#,
@@ -403,6 +427,26 @@ mod tests {
     }
 
     #[test]
+    fn load_from_path_reads_font_size_when_valid() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = settings_path_in(dir.path());
+        fs::create_dir_all(path.parent().expect("config dir")).expect("create config dir");
+        fs::write(
+            &path,
+            r#"{
+  "font_size": 18.5
+}
+"#,
+        )
+        .expect("write config");
+
+        let loaded = load_from_path(&path);
+
+        assert!(loaded.warnings.is_empty());
+        assert_eq!(loaded.config.font_size, Some(18.5));
+    }
+
+    #[test]
     fn save_writes_gtk_and_ghostty_color_schemes() {
         let dir = TempDir::new().expect("temp dir");
         let path = settings_path_in(dir.path());
@@ -427,11 +471,99 @@ mod tests {
     }
 
     #[test]
+    fn save_preserves_unrelated_top_level_keys() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = settings_path_in(dir.path());
+        fs::create_dir_all(path.parent().expect("config dir")).expect("create config dir");
+        fs::write(
+            &path,
+            r#"{
+  "custom": {
+    "keep": true
+  },
+  "focus": {
+    "hover_terminal_focus": false
+  }
+}
+"#,
+        )
+        .expect("write config");
+
+        let mut config = AppConfig::default();
+        config.appearance.color_scheme = ColorScheme::Dark;
+        save_to_path(&path, &config).expect("save config");
+
+        let raw = fs::read_to_string(&path).expect("read config");
+        let parsed: Value = serde_json::from_str(&raw).expect("parse config");
+        assert_eq!(parsed["custom"]["keep"], Value::Bool(true));
+        assert_eq!(
+            parsed["appearance"]["color_scheme"],
+            Value::String("dark".to_string())
+        );
+    }
+
+    #[test]
+    fn save_to_path_writes_and_clears_font_size() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = settings_path_in(dir.path());
+        fs::create_dir_all(path.parent().expect("config dir")).expect("create config dir");
+
+        let mut config = AppConfig {
+            font_size: Some(16.25),
+            ..AppConfig::default()
+        };
+        save_to_path(&path, &config).expect("save font size");
+
+        let raw = fs::read_to_string(&path).expect("read config");
+        let parsed: Value = serde_json::from_str(&raw).expect("parse config");
+        assert_eq!(parsed["font_size"], json!(16.25));
+
+        config.font_size = None;
+        save_to_path(&path, &config).expect("clear font size");
+
+        let raw = fs::read_to_string(&path).expect("read cleared config");
+        let parsed: Value = serde_json::from_str(&raw).expect("parse cleared config");
+        assert!(parsed.get("font_size").is_none());
+    }
+
+    #[test]
+    fn save_to_path_recovers_invalid_existing_json_by_backing_it_up() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = settings_path_in(dir.path());
+        fs::create_dir_all(path.parent().expect("config dir")).expect("create config dir");
+        fs::write(&path, "not json").expect("write invalid config");
+
+        let config = AppConfig::default();
+        save_to_path(&path, &config).expect("save should recover");
+
+        let raw = fs::read_to_string(&path).expect("read repaired config");
+        let parsed: Value = serde_json::from_str(&raw).expect("parse repaired config");
+        assert_eq!(
+            parsed["appearance"]["color_scheme"],
+            Value::String("system".to_string())
+        );
+
+        let backup = fs::read_dir(path.parent().expect("config dir"))
+            .expect("list config dir")
+            .find_map(|entry| {
+                let entry = entry.expect("dir entry");
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.contains(".settings.json.bak-").then_some(entry.path())
+            })
+            .expect("backup file");
+        assert_eq!(
+            fs::read_to_string(backup).expect("read backup config"),
+            "not json"
+        );
+    }
+
+    #[test]
     fn load_from_path_falls_back_to_defaults_on_invalid_json() {
         let dir = TempDir::new().expect("temp dir");
         let path = settings_path_in(dir.path());
         fs::create_dir_all(path.parent().expect("config dir")).expect("create config dir");
-        fs::write(&path, "{ not valid json").expect("write invalid config");
+        fs::write(&path, "not json").expect("write config");
 
         let loaded = load_from_path(&path);
 

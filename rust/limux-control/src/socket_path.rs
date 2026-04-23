@@ -1,5 +1,10 @@
 use std::env;
-use std::os::unix::fs::MetadataExt;
+use std::fs;
+use std::io;
+use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
+use std::path::Path;
 use std::path::PathBuf;
 
 const LIMUX_SOCKET_ENV: &str = "LIMUX_SOCKET";
@@ -8,6 +13,8 @@ const RUNTIME_SUBDIR: &str = "limux";
 const RUNTIME_SOCKET_NAME: &str = "limux.sock";
 const FALLBACK_RUNTIME_SOCKET: &str = "/tmp/limux.sock";
 const DEBUG_SOCKET: &str = "/tmp/limux-debug.sock";
+const PRIVATE_DIR_MODE: u32 = 0o700;
+const SOCKET_FILE_MODE: u32 = 0o600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SocketMode {
@@ -39,34 +46,108 @@ pub fn resolve_socket_path(explicit: Option<PathBuf>, mode: SocketMode) -> PathB
     SocketMode::default_for(mode)
 }
 
+pub fn prepare_socket_path(path: &Path, mode: SocketMode, owner_only: bool) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+        if owner_only && should_lock_down_parent(path, mode) {
+            fs::set_permissions(parent, PermissionsExt::from_mode(PRIVATE_DIR_MODE))?;
+        }
+    }
+    remove_existing_socket(path)?;
+    Ok(())
+}
+
+pub fn finalize_socket_permissions(path: &Path, owner_only: bool) -> io::Result<()> {
+    if owner_only {
+        fs::set_permissions(path, PermissionsExt::from_mode(SOCKET_FILE_MODE))?;
+    }
+    Ok(())
+}
+
+pub fn bind_listener(
+    path: &Path,
+    mode: SocketMode,
+    owner_only: bool,
+) -> io::Result<StdUnixListener> {
+    prepare_socket_path(path, mode, owner_only)?;
+    let listener = StdUnixListener::bind(path)?;
+    finalize_socket_permissions(path, owner_only)?;
+    Ok(listener)
+}
+
+pub fn bind_tokio_listener(
+    path: &Path,
+    mode: SocketMode,
+    owner_only: bool,
+) -> io::Result<tokio::net::UnixListener> {
+    prepare_socket_path(path, mode, owner_only)?;
+    let listener = tokio::net::UnixListener::bind(path)?;
+    finalize_socket_permissions(path, owner_only)?;
+    Ok(listener)
+}
+
 fn default_runtime_socket_path() -> PathBuf {
     match env::var_os("XDG_RUNTIME_DIR") {
         Some(runtime_dir) if !runtime_dir.is_empty() => {
             let mut path = PathBuf::from(runtime_dir);
-            if runtime_dir_is_secure(&path) {
-                path.push(RUNTIME_SUBDIR);
-                path.push(RUNTIME_SOCKET_NAME);
-                path
-            } else {
-                PathBuf::from(FALLBACK_RUNTIME_SOCKET)
-            }
+            path.push(RUNTIME_SUBDIR);
+            path.push(RUNTIME_SOCKET_NAME);
+            path
         }
         _ => PathBuf::from(FALLBACK_RUNTIME_SOCKET),
     }
 }
 
-fn runtime_dir_is_secure(path: &std::path::Path) -> bool {
-    if !path.is_absolute() {
-        return false;
+fn default_runtime_socket_dir() -> Option<PathBuf> {
+    let runtime_dir = env::var_os("XDG_RUNTIME_DIR")?;
+    if runtime_dir.is_empty() {
+        return None;
     }
 
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
+    let mut path = PathBuf::from(runtime_dir);
+    path.push(RUNTIME_SUBDIR);
+    Some(path)
+}
+
+fn should_lock_down_parent(path: &Path, mode: SocketMode) -> bool {
+    matches!(mode, SocketMode::Runtime) && path.parent() == default_runtime_socket_dir().as_deref()
+}
+
+fn remove_existing_socket(path: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
     };
 
-    metadata.is_dir()
-        && metadata.uid() == unsafe { libc::getuid() }
-        && (metadata.mode() & 0o777) == 0o700
+    if !metadata.file_type().is_socket() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("refusing to overwrite non-socket path {}", path.display()),
+        ));
+    }
+
+    match StdUnixStream::connect(path) {
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!("socket already in use at {}", path.display()),
+        )),
+        Err(error) if is_stale_socket_error(&error) => {
+            fs::remove_file(path)?;
+            Ok(())
+        }
+        Err(error) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!("refusing to replace socket at {}: {error}", path.display()),
+        )),
+    }
+}
+
+fn is_stale_socket_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+    )
 }
 
 fn get_env_path(key: &str) -> Option<PathBuf> {
@@ -83,6 +164,8 @@ fn get_env_path(key: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -158,11 +241,6 @@ mod tests {
         let _socket = EnvGuard::set(LIMUX_SOCKET_ENV, None);
         let _socket_path = EnvGuard::set(LIMUX_SOCKET_PATH_ENV, None);
         let xdg = TempDir::new().expect("xdg runtime dir temp path");
-        std::fs::set_permissions(
-            xdg.path(),
-            std::os::unix::fs::PermissionsExt::from_mode(0o700),
-        )
-        .expect("set runtime dir perms");
         let _xdg = EnvGuard::set("XDG_RUNTIME_DIR", Some(xdg.path().to_str().expect("utf8")));
 
         let resolved = resolve_socket_path(None, SocketMode::Runtime);
@@ -184,19 +262,99 @@ mod tests {
     }
 
     #[test]
-    fn insecure_runtime_dir_falls_back_to_tmp_socket() {
+    fn prepare_socket_path_locks_down_runtime_parent_dir() {
         let _lock = ENV_TEST_LOCK.lock().expect("env test lock");
         let _socket = EnvGuard::set(LIMUX_SOCKET_ENV, None);
         let _socket_path = EnvGuard::set(LIMUX_SOCKET_PATH_ENV, None);
         let xdg = TempDir::new().expect("xdg runtime dir temp path");
-        std::fs::set_permissions(
-            xdg.path(),
-            std::os::unix::fs::PermissionsExt::from_mode(0o755),
-        )
-        .expect("set runtime dir perms");
         let _xdg = EnvGuard::set("XDG_RUNTIME_DIR", Some(xdg.path().to_str().expect("utf8")));
 
-        let resolved = resolve_socket_path(None, SocketMode::Runtime);
-        assert_eq!(resolved, PathBuf::from(FALLBACK_RUNTIME_SOCKET));
+        let path = resolve_socket_path(None, SocketMode::Runtime);
+        prepare_socket_path(&path, SocketMode::Runtime, true).expect("prepare socket path");
+
+        let mode = std::fs::metadata(path.parent().expect("socket parent"))
+            .expect("parent metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, PRIVATE_DIR_MODE);
+    }
+
+    #[test]
+    fn finalize_socket_permissions_sets_socket_mode() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let socket_path = temp_dir.path().join("limux.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind listener");
+
+        finalize_socket_permissions(&socket_path, true).expect("set socket permissions");
+
+        let mode = std::fs::metadata(&socket_path)
+            .expect("socket metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, SOCKET_FILE_MODE);
+
+        drop(listener);
+    }
+
+    #[test]
+    fn prepare_socket_path_does_not_force_private_parent_for_allow_all() {
+        let _lock = ENV_TEST_LOCK.lock().expect("env test lock");
+        let _socket = EnvGuard::set(LIMUX_SOCKET_ENV, None);
+        let _socket_path = EnvGuard::set(LIMUX_SOCKET_PATH_ENV, None);
+        let xdg = TempDir::new().expect("xdg runtime dir temp path");
+        let _xdg = EnvGuard::set("XDG_RUNTIME_DIR", Some(xdg.path().to_str().expect("utf8")));
+
+        let path = resolve_socket_path(None, SocketMode::Runtime);
+        std::fs::create_dir_all(path.parent().expect("socket parent")).expect("create parent");
+        std::fs::set_permissions(
+            path.parent().expect("socket parent"),
+            PermissionsExt::from_mode(0o755),
+        )
+        .expect("set parent permissions");
+
+        prepare_socket_path(&path, SocketMode::Runtime, false).expect("prepare socket path");
+
+        let mode = std::fs::metadata(path.parent().expect("socket parent"))
+            .expect("parent metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755);
+    }
+
+    #[test]
+    fn prepare_socket_path_refuses_to_overwrite_non_socket_path() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let socket_path = temp_dir.path().join("limux.sock");
+        std::fs::write(&socket_path, b"not a socket").expect("write placeholder");
+
+        let error = prepare_socket_path(&socket_path, SocketMode::Runtime, true)
+            .expect_err("non-socket path should fail");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn prepare_socket_path_rejects_live_socket() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let socket_path = temp_dir.path().join("limux.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("bind listener");
+
+        let error = prepare_socket_path(&socket_path, SocketMode::Runtime, true)
+            .expect_err("live socket should fail");
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+    }
+
+    #[test]
+    fn prepare_socket_path_removes_stale_socket() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let socket_path = temp_dir.path().join("limux.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind listener");
+        drop(listener);
+
+        prepare_socket_path(&socket_path, SocketMode::Runtime, true)
+            .expect("stale socket should be removed");
+        assert!(!socket_path.exists());
     }
 }

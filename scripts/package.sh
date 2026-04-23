@@ -8,10 +8,14 @@ VERSION="${1:-$(grep '^version' "$ROOT_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.
 ARCH="$(uname -m)"
 DEB_ARCH="amd64"
 [ "$ARCH" = "aarch64" ] && DEB_ARCH="arm64"
+RPM_ARCH="x86_64"
+[ "$ARCH" = "aarch64" ] && RPM_ARCH="aarch64"
 
 PKG_BASE="limux-${VERSION}-linux-${ARCH}"
 STAGE="/tmp/limux-staging"
+GHOSTTY_INSTALL_ROOT="/tmp/limux-ghostty-install"
 GHOSTTY_SO="${ROOT_DIR}/ghostty/zig-out/lib/libghostty.so"
+MAX_GLIBC_VERSION="${LIMUX_MAX_GLIBC:-2.39}"
 GHOSTTY_SHARE_DIR=""
 GHOSTTY_TERMINFO_DIR=""
 ICONS_DIR="${ROOT_DIR}/rust/limux-host-linux/icons"
@@ -19,6 +23,7 @@ APP_ICONS_DIR="${ROOT_DIR}/rust/limux-host-linux/icons/app"
 DESKTOP_FILE="${ROOT_DIR}/rust/limux-host-linux/dev.limux.linux.desktop"
 METADATA_FILE="${ROOT_DIR}/rust/limux-host-linux/dev.limux.linux.metainfo.xml"
 OUT_DIR="${ROOT_DIR}/dist"
+GHOSTTY_ZIG_ARGS=(-Doptimize=ReleaseFast -Dcpu=baseline)
 
 remove_tree() {
     local path="$1"
@@ -32,10 +37,52 @@ remove_tree() {
     rmdir "$path" 2>/dev/null || true
 }
 
+version_gt() {
+    local left="$1"
+    local right="$2"
+    [ "$left" != "$right" ] && [ "$(printf '%s\n%s\n' "$left" "$right" | sort -V | tail -n1)" = "$left" ]
+}
+
+glibc_requirement_for() {
+    local path="$1"
+
+    if ! command -v objdump >/dev/null 2>&1; then
+        return 0
+    fi
+
+    objdump -T "$path" 2>/dev/null \
+        | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+        | sed 's/^GLIBC_//' \
+        | sort -Vu \
+        | tail -n1
+}
+
+assert_glibc_compatibility() {
+    local path="$1"
+    local label="$2"
+    local required_glibc
+
+    required_glibc="$(glibc_requirement_for "$path")"
+    if [ -z "$required_glibc" ]; then
+        echo "WARNING: unable to determine GLIBC requirement for ${label}"
+        return 0
+    fi
+
+    if version_gt "$required_glibc" "$MAX_GLIBC_VERSION"; then
+        echo "ERROR: ${label} requires GLIBC_${required_glibc}, which exceeds the supported release baseline GLIBC_${MAX_GLIBC_VERSION}."
+        echo "Build release artifacts inside Ubuntu 24.04 or another environment pinned to GLIBC_${MAX_GLIBC_VERSION} or older."
+        echo "Override the baseline intentionally with LIMUX_MAX_GLIBC=<version> if you are targeting a newer distro on purpose."
+        exit 1
+    fi
+
+    echo "Verified ${label} GLIBC requirement: GLIBC_${required_glibc} (target max GLIBC_${MAX_GLIBC_VERSION})"
+}
+
 resolve_ghostty_share_dir() {
     local candidate
 
     for candidate in \
+        "${GHOSTTY_INSTALL_ROOT}/usr/share/ghostty" \
         "${ROOT_DIR}/ghostty/zig-out/share/ghostty" \
         "/usr/local/share/ghostty" \
         "/usr/share/ghostty"
@@ -56,6 +103,7 @@ resolve_ghostty_terminfo_dir() {
     parent="$(dirname "$GHOSTTY_SHARE_DIR")"
 
     for candidate in \
+        "${GHOSTTY_INSTALL_ROOT}/usr/share/terminfo" \
         "${parent}/terminfo" \
         "/usr/local/share/terminfo" \
         "/usr/share/terminfo"
@@ -84,9 +132,32 @@ copy_ghostty_terminfo_entries() {
     fi
 }
 
+configure_ghostty_build_args() {
+    if ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists gtk4-layer-shell-0; then
+        echo "gtk4-layer-shell not available via pkg-config; building Ghostty with bundled gtk4-layer-shell."
+        GHOSTTY_ZIG_ARGS+=(-fno-sys=gtk4-layer-shell)
+    fi
+}
+
+build_ghostty_resources() {
+    echo "Staging Ghostty resources..."
+    remove_tree "$GHOSTTY_INSTALL_ROOT"
+    mkdir -p "$GHOSTTY_INSTALL_ROOT"
+
+    (
+        cd "${ROOT_DIR}/ghostty"
+        DESTDIR="$GHOSTTY_INSTALL_ROOT" \
+            zig build \
+            --prefix /usr \
+            "${GHOSTTY_ZIG_ARGS[@]}" \
+            -Demit-docs=false
+    )
+}
+
 echo "=== Limux Packager ==="
 echo "Version: ${VERSION}"
 echo "Arch:    ${ARCH}"
+echo "GLIBC:   <= ${MAX_GLIBC_VERSION}"
 
 if ! command -v zig >/dev/null 2>&1; then
     echo "ERROR: zig not found in PATH."
@@ -101,9 +172,12 @@ if [ ! -f "${ROOT_DIR}/ghostty/build.zig" ]; then
 fi
 
 # Always build libghostty with ReleaseFast to guarantee optimized output.
-# A Debug build (Zig's default) causes ~7x slower terminal IO throughput.
-echo "Building libghostty (ReleaseFast)..."
-(cd "${ROOT_DIR}/ghostty" && zig build -Dapp-runtime=none -Doptimize=ReleaseFast)
+# Pinning cpu=baseline keeps the shipped library portable across x86_64 CPUs
+# that do not expose the builder's ISA extensions, such as AVX-512.
+configure_ghostty_build_args
+echo "Building libghostty (ReleaseFast, cpu=baseline)..."
+(cd "${ROOT_DIR}/ghostty" && zig build -Dapp-runtime=none "${GHOSTTY_ZIG_ARGS[@]}")
+build_ghostty_resources
 
 if [ ! -f "$GHOSTTY_SO" ]; then
     echo "ERROR: libghostty.so not found at ${GHOSTTY_SO} after build"
@@ -138,6 +212,9 @@ if [ ! -f "$BINARY" ]; then
     exit 1
 fi
 
+assert_glibc_compatibility "$GHOSTTY_SO" "libghostty.so"
+assert_glibc_compatibility "$BINARY" "limux"
+
 # Clean staging and output
 remove_tree "$STAGE"
 remove_tree "$OUT_DIR"
@@ -149,6 +226,7 @@ mkdir -p "$OUT_DIR"
 populate_tree() {
     local dest="$1"
     local prefix="${2:-/usr/local}"
+    local strip_files="${3:-true}"
     local bindir="$dest${prefix}/bin"
     local libdir="$dest${prefix}/lib/limux"
     local ghostty_datadir="$dest${prefix}/share/limux"
@@ -161,12 +239,16 @@ populate_tree() {
 
     # Binary
     cp "$BINARY" "$bindir/limux"
-    strip "$bindir/limux"
+    if [ "$strip_files" = "true" ]; then
+        strip "$bindir/limux"
+    fi
     chmod 755 "$bindir/limux"
 
     # Shared library
     cp "$GHOSTTY_SO" "$libdir/libghostty.so"
-    strip --strip-debug "$libdir/libghostty.so"
+    if [ "$strip_files" = "true" ]; then
+        strip --strip-debug "$libdir/libghostty.so"
+    fi
 
     # Ghostty resources required for named themes and shell integration
     cp -r "$GHOSTTY_SHARE_DIR"/. "$ghostty_resdir"
@@ -194,6 +276,53 @@ populate_tree() {
             fi
         done
     fi
+}
+
+build_rpm_source_tree() {
+    local dest="$1"
+
+    remove_tree "$dest"
+    mkdir -p "$dest"
+    populate_tree "$dest" "/usr" "false"
+
+    mkdir -p "$dest/etc/ld.so.conf.d"
+    echo "/usr/lib/limux" > "$dest/etc/ld.so.conf.d/limux.conf"
+}
+
+build_rpm_package() {
+    local rpm_src_dir="/tmp/limux-$VERSION"
+    local rpm_tarball="/tmp/limux-$VERSION.tar.gz"
+    local rpmbuild_dir="/tmp/rpmbuild-$VERSION"
+    local rpm_output="$rpmbuild_dir/RPMS/${RPM_ARCH}/limux-${VERSION}-1.${RPM_ARCH}.rpm"
+
+    if ! command -v rpmbuild >/dev/null 2>&1; then
+        echo "  WARNING: rpmbuild not found, skipping RPM"
+        return 0
+    fi
+
+    build_rpm_source_tree "$rpm_src_dir"
+    tar -czf "$rpm_tarball" -C /tmp "limux-$VERSION"
+    remove_tree "$rpm_src_dir"
+
+    remove_tree "$rpmbuild_dir"
+    mkdir -p "$rpmbuild_dir"/{BUILD,RPMS,SOURCES,SPECS}
+    cp "$rpm_tarball" "$rpmbuild_dir/SOURCES/"
+    cp "$ROOT_DIR/scripts/limux.spec" "$rpmbuild_dir/SPECS/"
+
+    rpmbuild -bb \
+        --define "_topdir $rpmbuild_dir" \
+        --define "version $VERSION" \
+        --target "$RPM_ARCH" \
+        "$rpmbuild_dir/SPECS/limux.spec" 2>&1
+
+    if [ -f "$rpm_output" ]; then
+        cp "$rpm_output" "$OUT_DIR/"
+        echo "  -> dist/limux-${VERSION}-1.${RPM_ARCH}.rpm"
+    else
+        echo "  WARNING: rpmbuild did not produce expected RPM file"
+    fi
+
+    remove_tree "$rpmbuild_dir"
 }
 
 # =========================================================================
@@ -390,7 +519,14 @@ dpkg-deb --build --root-owner-group "$DEB_ROOT" "$DEB_FILE"
 echo "  -> dist/limux_${VERSION}_${DEB_ARCH}.deb"
 
 # =========================================================================
-# 3. AppImage
+# 3. RPM package
+# =========================================================================
+echo ""
+echo "--- Building .rpm ---"
+build_rpm_package
+
+# =========================================================================
+# 4. AppImage
 # =========================================================================
 echo ""
 echo "--- Building AppImage ---"
@@ -477,4 +613,5 @@ echo ""
 echo "Install options:"
 echo "  Tarball:   tar xzf dist/${PKG_BASE}.tar.gz && cd ${PKG_BASE} && sudo ./install.sh"
 echo "  Deb:       sudo dpkg -i ./dist/limux_${VERSION}_${DEB_ARCH}.deb"
+echo "  RPM:       sudo rpm -i ./dist/limux-${VERSION}-1.${RPM_ARCH}.rpm"
 echo "  AppImage:  chmod +x dist/Limux-${VERSION}-${ARCH}.AppImage && ./dist/Limux-${VERSION}-${ARCH}.AppImage"

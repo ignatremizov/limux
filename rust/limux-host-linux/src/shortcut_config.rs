@@ -786,7 +786,7 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 47] = [
         id: ShortcutId::TerminalPaste,
         config_key: "terminal_paste",
         action_name: "win.terminal-paste",
-        default_accel: "<Ctrl>v",
+        default_accel: "<Ctrl><Shift>v",
         label: "Terminal Paste",
         registers_gtk_accel: false,
         command: ShortcutCommand::TerminalPaste,
@@ -797,7 +797,7 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 47] = [
         id: ShortcutId::TerminalIncreaseFontSize,
         config_key: "terminal_increase_font_size",
         action_name: "win.terminal-increase-font-size",
-        default_accel: "<Ctrl>plus",
+        default_accel: "<Ctrl>equal",
         label: "Terminal Increase Font Size",
         registers_gtk_accel: false,
         command: ShortcutCommand::TerminalIncreaseFontSize,
@@ -1877,6 +1877,23 @@ mod tests {
                 .map(ResolvedShortcut::default_display_label)
                 .as_deref(),
             Some("Ctrl+D")
+        );
+        assert_eq!(
+            resolved
+                .default_display_label_for_id(ShortcutId::TerminalPaste)
+                .as_deref(),
+            Some("Ctrl+Shift+V")
+        );
+    }
+
+    #[test]
+    fn default_terminal_paste_does_not_claim_plain_ctrl_v() {
+        let resolved = default_shortcuts();
+
+        assert_eq!(resolved.command_for_runtime_combo("ctrl+v"), None);
+        assert_eq!(
+            resolved.command_for_runtime_combo("ctrl+shift+v"),
+            Some(ShortcutCommand::TerminalPaste)
         );
     }
 
